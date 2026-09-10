@@ -17,8 +17,10 @@ pico_sdk_init()
 
 add_executable(adapter
     src/adapter.c
+    src/brake.c
     src/descriptors.c
 )
+target_compile_features(adapter PRIVATE c_std_11)
 target_include_directories(adapter PRIVATE src)
 target_link_libraries(adapter
     pico_stdlib

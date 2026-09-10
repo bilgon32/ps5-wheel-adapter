@@ -8,6 +8,7 @@
 #include "pico/stdio.h"
 
 #include "reports.h"
+#include "brake.h"
 
 uint8_t nonce_id;
 uint8_t nonce[280];
@@ -23,6 +24,11 @@ uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
+uint8_t brake_device = 0;
+uint8_t brake_instance = 0;
+bool brake_receive_pending = false;
+external_brake_t external_brake = { 0 };
+uint16_t wheel_brake = BRAKE_G29_RELEASED;
 
 bool busy = false;
 
@@ -65,6 +71,7 @@ void report_init() {
     report.rx = 0x80;
     report.ry = 0x80;
     report.clutch = 0xFFFF;
+    report.brake = BRAKE_G29_RELEASED;
     memcpy(&prev_report, &report, sizeof(report));
 }
 
@@ -74,10 +81,12 @@ void hid_task() {
     }
 
     report.PS = report.select && report.start;
+    report.brake = external_brake_value(&external_brake, wheel_brake, board_millis());
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
-        tud_hid_report(1, &report, sizeof(report));
-        memcpy(&prev_report, &report, sizeof(report));
+        if (tud_hid_report(1, &report, sizeof(report))) {
+            memcpy(&prev_report, &report, sizeof(report));
+        }
     }
 
     if (memcmp(prev_ff_buf, ff_buf, sizeof(ff_buf))) {
@@ -85,6 +94,13 @@ void hid_task() {
             tuh_hid_send_report(wheel_device, wheel_instance, 0, ff_buf, sizeof(ff_buf));
         }
         memcpy(prev_ff_buf, ff_buf, sizeof(ff_buf));
+    }
+}
+
+void brake_task() {
+    if (brake_device && !brake_receive_pending) {
+        // Retry on subsequent iterations if the host could not queue a receive.
+        brake_receive_pending = tuh_hid_receive_report(brake_device, brake_instance);
     }
 }
 
@@ -137,6 +153,7 @@ int main() {
     while (1) {
         tuh_task();
         tud_task();
+        brake_task();
         hid_task();
         auth_task();
         wheel_init_task();
@@ -270,7 +287,17 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
         wheel_instance = instance;
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
-    } else {  // assume everything else is the controller we use for authentication
+    } else if ((vid == BRAKE_USB_VID) && (pid == BRAKE_USB_PID)) {
+        // Reserve every HID interface of this device so it can never replace auth.
+        // The measured Micro has one HID interface (USB interface 2).
+        if (!brake_device) {
+            brake_device = dev_addr;
+            brake_instance = instance;
+            brake_receive_pending = false;
+            external_brake_connect(&external_brake);
+            printf("External Arduino brake connected\n");
+        }
+    } else {  // retain the original auth-controller convention for other devices
         auth_device = dev_addr;
         auth_instance = instance;
     }
@@ -278,23 +305,36 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     printf("tuh_hid_umount_cb\n");
-    if (dev_addr == wheel_device) {
+    if ((dev_addr == wheel_device) && (instance == wheel_instance)) {
         wheel_device = 0;
         wheel_instance = 0;
+        wheel_brake = BRAKE_G29_RELEASED;
     }
-    if (dev_addr == auth_device) {
+    if ((dev_addr == brake_device) && (instance == brake_instance)) {
+        brake_device = 0;
+        brake_instance = 0;
+        brake_receive_pending = false;
+        external_brake_disconnect(&external_brake);
+        printf("External brake disconnected; brake released until reconnect\n");
+    }
+    if ((dev_addr == auth_device) && (instance == auth_instance)) {
         auth_device = 0;
         auth_instance = 0;
     }
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
-    if (len > 0) {
-        if (dev_addr == wheel_device) {
-            df_report_t* df = (df_report_t*) report_;
+    if ((dev_addr == brake_device) && (instance == brake_instance)) {
+        brake_receive_pending = false;
+        external_brake_receive(&external_brake, report_, len, board_millis());
+        return;
+    }
+    if ((dev_addr == wheel_device) && (instance == wheel_instance)) {
+        if (len >= sizeof(df_report_t)) {
+            const df_report_t* df = (const df_report_t*) report_;
             report.wheel = df->wheel << 6;
             report.throttle = df->throttle << 8;
-            report.brake = df->brake << 8;
+            wheel_brake = df->brake << 8;
             report.dpad = df->hat;
             report.cross = df->cross;
             report.square = df->square;
@@ -309,7 +349,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3 = df->R3;
             report.L3 = df->L3;
         }
+        tuh_hid_receive_report(dev_addr, instance);
     }
-
-    tuh_hid_receive_report(dev_addr, instance);
 }
