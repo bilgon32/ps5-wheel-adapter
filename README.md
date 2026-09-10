@@ -73,8 +73,9 @@ devices fail to enumerate.
 - Soldering equipment, or a Pico with headers, breadboard, breakout board, and
   jumper wires.
 
-The Razer Raion was used by the upstream author. A standard DualShock 4 does not
-satisfy this adapter's authentication requirement.
+This fork is successfully tested with a **Hori Wired Controller Light for PS4**
+for authentication. The Razer Raion was used by the upstream author. A standard
+DualShock 4 does not satisfy this adapter's authentication requirement.
 
 ## Hardware assembly
 
