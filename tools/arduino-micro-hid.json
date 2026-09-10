@@ -1,0 +1,149 @@
+{
+  "Vid": "2341",
+  "Pid": "8037",
+  "InputReportBytes": 28,
+  "UsagePage": 1,
+  "Usage": 4,
+  "Axes": [
+    {
+      "UsagePage": 1,
+      "UsageMin": 57,
+      "UsageMax": 57,
+      "ReportId": 3,
+      "BitSize": 4,
+      "ReportCount": 1,
+      "LogicalMin": 0,
+      "LogicalMax": 7
+    },
+    {
+      "UsagePage": 1,
+      "UsageMin": 57,
+      "UsageMax": 57,
+      "ReportId": 3,
+      "BitSize": 4,
+      "ReportCount": 1,
+      "LogicalMin": 0,
+      "LogicalMax": 7
+    },
+    {
+      "UsagePage": 1,
+      "UsageMin": 53,
+      "UsageMax": 53,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    },
+    {
+      "UsagePage": 1,
+      "UsageMin": 52,
+      "UsageMax": 52,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    },
+    {
+      "UsagePage": 1,
+      "UsageMin": 51,
+      "UsageMax": 51,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    },
+    {
+      "UsagePage": 1,
+      "UsageMin": 50,
+      "UsageMax": 50,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    },
+    {
+      "UsagePage": 1,
+      "UsageMin": 49,
+      "UsageMax": 49,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    },
+    {
+      "UsagePage": 1,
+      "UsageMin": 48,
+      "UsageMax": 48,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    },
+    {
+      "UsagePage": 2,
+      "UsageMin": 200,
+      "UsageMax": 200,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    },
+    {
+      "UsagePage": 2,
+      "UsageMin": 197,
+      "UsageMax": 197,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    },
+    {
+      "UsagePage": 2,
+      "UsageMin": 196,
+      "UsageMax": 196,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    },
+    {
+      "UsagePage": 2,
+      "UsageMin": 187,
+      "UsageMax": 187,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    },
+    {
+      "UsagePage": 2,
+      "UsageMin": 186,
+      "UsageMax": 186,
+      "ReportId": 3,
+      "BitSize": 16,
+      "ReportCount": 1,
+      "LogicalMin": -32767,
+      "LogicalMax": 32767
+    }
+  ],
+  "RzPayloadBitOffset": 120,
+  "ReportsRead": 233,
+  "Minimum": -32767,
+  "Maximum": -32767,
+  "Samples": [
+    {
+      "Rz": -32767,
+      "Hex": "03-00-00-00-00-88-01-80-01-80-01-80-01-80-01-80-01-80-01-80-01-80-01-80-01-80-01-80"
+    }
+  ]
+}
