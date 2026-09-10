@@ -4,11 +4,19 @@
 
 #include "bsp/board_api.h"
 #include "tusb.h"
+#ifndef _MSC_VER
+#include "pio_usb.h"
+#endif
 
 #include "pico/stdio.h"
+#ifndef _MSC_VER
+#include "pico/time.h"
+#endif
 
 #include "reports.h"
 #include "brake.h"
+#include "g27.h"
+#include "ffb.h"
 
 uint8_t nonce_id;
 uint8_t nonce[280];
@@ -42,12 +50,32 @@ enum {
 
 uint8_t state = IDLE;
 
-bool initialized = true;
+typedef enum {
+    WHEEL_ABSENT, WHEEL_PREPARE_NATIVE, WHEEL_REVERT_ON_RESET, WHEEL_SWITCH_NATIVE,
+    WHEEL_WAIT_NATIVE, WHEEL_STOP_FORCES, WHEEL_AUTOCENTER_OFF,
+    WHEEL_RANGE, WHEEL_LEDS_OFF, WHEEL_READY
+} wheel_phase_t;
+wheel_phase_t wheel_phase = WHEEL_ABSENT;
+uint16_t wheel_pid;
+bool wheel_receive_pending, wheel_tx_pending, wheel_tx_ffb;
+bool expecting_native;
+uint8_t wheel_mode_failures;
+uint8_t wheel_init_failures;
+uint32_t wheel_wait_started, wheel_tx_retries;
+uint32_t wheel_tx_retry_at, wheel_receive_retry_at;
+uint32_t wheel_last_diagnostic;
+ffb_queue_t ffb_queue = { 0 };
+
+static uint32_t adapter_millis(void) {
+#ifdef _MSC_VER
+    return board_millis();
+#else
+    return to_ms_since_boot(get_absolute_time());
+#endif
+}
 
 uint8_t get_buffer[64];
 uint8_t set_buffer[64];
-uint8_t ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
 g29_report_t report;
 g29_report_t prev_report;
@@ -64,7 +92,7 @@ const uint8_t output_0x03[] = {
 
 const uint8_t output_0xf3[] = { 0x0, 0x38, 0x38, 0, 0, 0, 0 };
 
-void report_init() {
+void wheel_controls_reset() {
     memset(&report, 0, sizeof(report));
     report.lx = 0x80;
     report.ly = 0x80;
@@ -72,6 +100,15 @@ void report_init() {
     report.ry = 0x80;
     report.clutch = 0xFFFF;
     report.brake = BRAKE_G29_RELEASED;
+    report.throttle = UINT16_MAX;
+    report.wheel = 0x8000;
+    report.dpad = 8;
+    report.pedal_reserved[0] = report.pedal_reserved[1] = 0xff;
+    wheel_brake = BRAKE_G29_RELEASED;
+}
+
+void report_init() {
+    wheel_controls_reset();
     memcpy(&prev_report, &report, sizeof(report));
 }
 
@@ -80,8 +117,10 @@ void hid_task() {
         return;
     }
 
+    uint32_t now = adapter_millis();
+    // On a G27, Select and Start are the second and third red shifter buttons.
     report.PS = report.select && report.start;
-    report.brake = external_brake_value(&external_brake, wheel_brake, board_millis());
+    report.brake = external_brake_value(&external_brake, wheel_brake, now);
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
         if (tud_hid_report(1, &report, sizeof(report))) {
@@ -89,12 +128,6 @@ void hid_task() {
         }
     }
 
-    if (memcmp(prev_ff_buf, ff_buf, sizeof(ff_buf))) {
-        if (wheel_device) {
-            tuh_hid_send_report(wheel_device, wheel_instance, 0, ff_buf, sizeof(ff_buf));
-        }
-        memcpy(prev_ff_buf, ff_buf, sizeof(ff_buf));
-    }
 }
 
 void brake_task() {
@@ -104,22 +137,161 @@ void brake_task() {
     }
 }
 
-void wheel_init_task() {
-    if (wheel_device && !initialized) {
-        initialized = true;
-        static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  // disable autocenter
-        tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+static bool deadline_reached(uint32_t now, uint32_t deadline) {
+    return (int32_t) (now - deadline) >= 0;
+}
+
+static void wheel_command_succeeded() {
+    wheel_init_failures = 0;
+    switch (wheel_phase) {
+        case WHEEL_PREPARE_NATIVE: wheel_phase = WHEEL_REVERT_ON_RESET; break;
+        case WHEEL_REVERT_ON_RESET: wheel_phase = WHEEL_SWITCH_NATIVE; break;
+        case WHEEL_SWITCH_NATIVE: wheel_phase = WHEEL_WAIT_NATIVE; break;
+        case WHEEL_STOP_FORCES: wheel_phase = WHEEL_AUTOCENTER_OFF; break;
+        case WHEEL_AUTOCENTER_OFF: wheel_phase = wheel_pid == G27_PID ? WHEEL_RANGE : WHEEL_READY; break;
+        case WHEEL_RANGE: wheel_phase = WHEEL_LEDS_OFF; break;
+        case WHEEL_LEDS_OFF:
+            wheel_phase = WHEEL_READY;
+            printf("G27 native inputs and FFB ready\n");
+            break;
+        default: break;
     }
 }
 
+static void wheel_setup_command_failed(uint32_t now) {
+    wheel_tx_retries++;
+    wheel_tx_retry_at = now + 20u;
+    if (wheel_phase == WHEEL_PREPARE_NATIVE || wheel_phase == WHEEL_REVERT_ON_RESET ||
+        wheel_phase == WHEEL_SWITCH_NATIVE) {
+        expecting_native = false;
+        if (++wheel_mode_failures >= 3) {
+            wheel_mode_failures = 0;
+            if (wheel_phase == WHEEL_SWITCH_NATIVE) {
+                wheel_phase = WHEEL_READY;
+                printf("Native-mode switch failed; retaining compatibility mode\n");
+            } else {
+                printf("Native-mode preparation command failed; continuing sequence\n");
+                wheel_command_succeeded();
+            }
+        }
+        return;
+    }
+    // Initialization commands improve wheel state but must never prevent input.
+    if (++wheel_init_failures >= 3) {
+        printf("Wheel initialization command %u failed; continuing\n", (unsigned) wheel_phase);
+        wheel_command_succeeded();
+    }
+}
+
+void wheel_init_task() {
+    uint32_t now = adapter_millis();
+    if (!wheel_device) {
+        if (expecting_native && (uint32_t) (now - wheel_wait_started) >= 5000u) {
+            expecting_native = false;
+            ffb_clear(&ffb_queue);
+            printf("G27 did not re-enumerate; reconnect the wheel\n");
+        }
+        return;
+    }
+    if (wheel_phase == WHEEL_WAIT_NATIVE) {
+        if ((uint32_t) (now - wheel_wait_started) >= 3000u) {
+            expecting_native = false;
+            wheel_phase = WHEEL_READY;
+            printf("Native-mode switch timed out; retaining compatibility mode\n");
+        }
+        return;
+    }
+    static const uint8_t prepare[] = { 0xf5, 0, 0, 0, 0, 0, 0 };
+    static const uint8_t revert[] = { 0xf8, 0x0a, 0, 0, 0, 0, 0 };
+    static const uint8_t native[] = { 0xf8, 0x09, 0x04, 0x01, 0, 0, 0 };
+    static const uint8_t stop[] = { 0xf3, 0, 0, 0, 0, 0, 0 };
+    static const uint8_t autocenter[] = { 0xf5, 0, 0, 0, 0, 0, 0 };
+    static const uint8_t range[] = { 0xf8, 0x81, 0x84, 0x03, 0, 0, 0 }; // 900 degrees
+    static const uint8_t leds[] = { 0xf8, 0x12, 0, 0, 0, 0, 0 };
+    const uint8_t* command = NULL;
+    switch (wheel_phase) {
+        case WHEEL_PREPARE_NATIVE: command = prepare; break;
+        case WHEEL_REVERT_ON_RESET: command = revert; break;
+        case WHEEL_SWITCH_NATIVE: command = native; break;
+        case WHEEL_STOP_FORCES: command = stop; break;
+        case WHEEL_AUTOCENTER_OFF: command = autocenter; break;
+        case WHEEL_RANGE: command = range; break;
+        case WHEEL_LEDS_OFF: command = leds; break;
+        default: break;
+    }
+    if (command) {
+        if (wheel_tx_pending) return;
+        if (busy || !deadline_reached(now, wheel_tx_retry_at)) return;
+        wheel_tx_ffb = false;
+        if (tuh_hid_send_report(wheel_device, wheel_instance, 0, command, FFB_COMMAND_SIZE)) {
+            wheel_tx_pending = true;
+            if (wheel_phase == WHEEL_SWITCH_NATIVE) {
+                expecting_native = true;
+                wheel_wait_started = now;
+            }
+        } else {
+            wheel_setup_command_failed(now);
+        }
+        return;
+    }
+
+    // Once initialized, keep interrupt IN armed while game FFB uses interrupt
+    // OUT. Native reports may complete only when a control changes, so making
+    // output wait for input would stall force feedback while driving straight.
+    if (!wheel_receive_pending && deadline_reached(now, wheel_receive_retry_at)) {
+        wheel_receive_pending = tuh_hid_receive_report(wheel_device, wheel_instance);
+        if (!wheel_receive_pending) wheel_receive_retry_at = now + 10u;
+    }
+    command = ffb_front(&ffb_queue);
+    if (command && !wheel_tx_pending && !busy && deadline_reached(now, wheel_tx_retry_at)) {
+        wheel_tx_ffb = true;
+        if (tuh_hid_send_report(wheel_device, wheel_instance, 0, command, FFB_COMMAND_SIZE)) {
+            wheel_tx_pending = true;
+            return;
+        }
+        wheel_tx_ffb = false;
+        wheel_tx_retries++;
+        wheel_tx_retry_at = now + 10u;
+    }
+    // UART diagnostics only; no USB identity/interface changes.
+    if ((uint32_t) (now - wheel_last_diagnostic) >= 10000u) {
+        wheel_last_diagnostic = now;
+        printf("FFB rx=%lu sent=%lu queued=%u peak=%u retries=%lu overflow=%lu blocked_modes=%lu\n",
+            (unsigned long) ffb_queue.received, (unsigned long) ffb_queue.sent,
+            ffb_queue.count, ffb_queue.high_water, (unsigned long) wheel_tx_retries,
+            (unsigned long) ffb_queue.overflows, (unsigned long) ffb_queue.blocked_mode_changes);
+    }
+}
+
+void tuh_hid_report_sent_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* data, uint16_t len) {
+    (void) data;
+    if (dev_addr != wheel_device || instance != wheel_instance || !wheel_tx_pending) return;
+    wheel_tx_pending = false;
+    if (len != FFB_COMMAND_SIZE) {
+        if (wheel_tx_ffb) {
+            wheel_tx_retries++;
+            wheel_tx_retry_at = adapter_millis() + 10u;
+        } else {
+            wheel_setup_command_failed(adapter_millis());
+        }
+        return;
+    }
+    if (wheel_tx_ffb) {
+        ffb_pop(&ffb_queue);
+        return;
+    }
+    wheel_mode_failures = 0;
+    wheel_tx_retry_at = adapter_millis() + 20u;
+    wheel_command_succeeded();
+}
+
 void auth_task() {
-    if (!busy && auth_device) {
+    if (!busy && !wheel_tx_pending && auth_device) {
         switch (state) {
             case IDLE:
                 break;
             case SENDING_RESET:
-                tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
-                busy = true;
+                busy = tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
                 break;
             case SENDING_NONCE:
                 set_buffer[0] = 0xF0;
@@ -128,17 +300,14 @@ void auth_task() {
                 set_buffer[3] = 0;
                 memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
                 printf(".");
-                tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
-                busy = true;
-                nonce_part++;
+                busy = tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
+                if (busy) nonce_part++;
                 break;
             case WAITING_FOR_SIG:
-                tuh_hid_get_report(auth_device, auth_instance, 0xF2, HID_REPORT_TYPE_FEATURE, get_buffer, 15 + 1);
-                busy = true;
+                busy = tuh_hid_get_report(auth_device, auth_instance, 0xF2, HID_REPORT_TYPE_FEATURE, get_buffer, 15 + 1);
                 break;
             case RECEIVING_SIG:
-                tuh_hid_get_report(auth_device, auth_instance, 0xF1, HID_REPORT_TYPE_FEATURE, get_buffer, 63 + 1);
-                busy = true;
+                busy = tuh_hid_get_report(auth_device, auth_instance, 0xF1, HID_REPORT_TYPE_FEATURE, get_buffer, 63 + 1);
                 break;
         }
     }
@@ -147,6 +316,18 @@ void auth_task() {
 int main() {
     board_init();
     report_init();
+#ifndef _MSC_VER
+    // Preserve the two-PIO layout used by the repository's proven 2023 host
+    // stack. New Pico-PIO-USB defaults both engines to PIO0, which prevents the
+    // existing downstream hub from enumerating on this RP2040 adapter.
+    pio_usb_configuration_t pio_config = PIO_USB_DEFAULT_CONFIG;
+    pio_config.pio_tx_num = 0;
+    pio_config.sm_tx = 0;
+    pio_config.pio_rx_num = 1;
+    pio_config.sm_rx = 0;
+    pio_config.sm_eop = 1;
+    tuh_configure(BOARD_TUH_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_config);
+#endif
     tusb_init();
     stdio_init_all();
 
@@ -268,10 +449,12 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
             nonce_part = 0;
         }
     } else {
-        if (bufsize > sizeof(ff_buf)) {
-            // pass everything through to the wheel
-            memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
-        }
+        // The original adapter accepted every non-auth SET_REPORT here. Keep
+        // that behavior: the PS5 may label G29 report 5 differently from a
+        // Windows interrupt-OUT write even though its payload is wheel output.
+        uint32_t overflows = ffb_queue.overflows;
+        ffb_enqueue_report(&ffb_queue, report_id, buffer, bufsize);
+        if (ffb_queue.overflows != overflows) printf("FFB queue overflow: command dropped\n");
     }
 }
 
@@ -282,11 +465,27 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
 
-    if ((vid == 0x046d) && (pid == 0xc294)) {  // Driving Force (or another wheel in compatibility mode)
+    if ((vid == LOGITECH_VID) && (pid == DRIVING_FORCE_PID || pid == G27_PID)) {
+        if (wheel_device) return;
         wheel_device = dev_addr;
         wheel_instance = instance;
-        tuh_hid_receive_report(dev_addr, instance);
-        initialized = false;
+        wheel_pid = pid;
+        // Logitech mode and setup commands use interrupt OUT. Keep interrupt IN
+        // unarmed until setup finishes because this PIO host serializes wheel I/O.
+        wheel_receive_pending = false;
+        wheel_tx_pending = false;
+        wheel_tx_ffb = false;
+        wheel_mode_failures = 0;
+        wheel_init_failures = 0;
+        wheel_tx_retry_at = 0;
+        wheel_receive_retry_at = 0;
+        expecting_native = false;
+        // Logitech hides several wheels behind the c294 compatibility identity.
+        // Re-reading the device descriptor disconnects a G27 on the PIO USB
+        // host, so attempt the reversible G27 native-mode sequence directly.
+        // Unsupported wheels time out and continue in compatibility mode.
+        wheel_phase = pid == G27_PID ? WHEEL_STOP_FORCES : WHEEL_PREPARE_NATIVE;
+        wheel_controls_reset();
     } else if ((vid == BRAKE_USB_VID) && (pid == BRAKE_USB_PID)) {
         // Reserve every HID interface of this device so it can never replace auth.
         // The measured Micro has one HID interface (USB interface 2).
@@ -308,7 +507,12 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     if ((dev_addr == wheel_device) && (instance == wheel_instance)) {
         wheel_device = 0;
         wheel_instance = 0;
-        wheel_brake = BRAKE_G29_RELEASED;
+        wheel_phase = WHEEL_ABSENT;
+        wheel_receive_pending = false;
+        wheel_tx_pending = false;
+        wheel_tx_ffb = false;
+        wheel_controls_reset();
+        if (!expecting_native) ffb_clear(&ffb_queue);
     }
     if ((dev_addr == brake_device) && (instance == brake_instance)) {
         brake_device = 0;
@@ -326,10 +530,19 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if ((dev_addr == brake_device) && (instance == brake_instance)) {
         brake_receive_pending = false;
-        external_brake_receive(&external_brake, report_, len, board_millis());
+        external_brake_receive(&external_brake, report_, len, adapter_millis());
         return;
     }
     if ((dev_addr == wheel_device) && (instance == wheel_instance)) {
+        wheel_receive_pending = false;
+        if (!len) {
+            wheel_receive_retry_at = adapter_millis() + 10u;
+            return;
+        }
+        if (wheel_pid == G27_PID) {
+            g27_decode(report_, len, &report, &wheel_brake);
+            return;
+        }
         if (len >= sizeof(df_report_t)) {
             const df_report_t* df = (const df_report_t*) report_;
             report.wheel = df->wheel << 6;
@@ -349,6 +562,5 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3 = df->R3;
             report.L3 = df->L3;
         }
-        tuh_hid_receive_report(dev_addr, instance);
     }
 }

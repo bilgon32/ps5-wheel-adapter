@@ -2,7 +2,8 @@
 
 This is a personal fork of [jfedor2/wheel-adapter](https://github.com/jfedor2/wheel-adapter).
 The original adapter and authentication implementation are by jfedor2. This fork
-adds Arduino Micro load-cell brake support, Windows HID diagnostics, and tests.
+adds Arduino Micro load-cell braking, G27 native inputs, ordered force-feedback
+forwarding, Windows HID diagnostics, and tests.
 The original commit history and dependency submodules are preserved.
 
 No project-wide license was found upstream. This fork does not grant additional
@@ -37,7 +38,19 @@ Then plug a USB hub into the port you added to the Pico and plug both your wheel
 
 ![Diagram of the connections](diagram.png)
 
-The wheel will operate in Driving Force compatibility mode so even if your wheel has a PlayStation button, it probably won't work. Pressing the "select" and "start" buttons at the same time works as the PlayStation button. If your wheel has more buttons than the basic 12, you probably won't be able to use them as unique buttons (they will work as duplicates of the standard ones).
+The original binary uses Driving Force compatibility mode. Source builds now
+switch Logitech wheels using the `c294` compatibility identity into G27 native
+mode for clutch, H-shifter and independent
+wheel buttons; other wheels retain compatibility mode. Pressing “select” and
+“start” together works as the PlayStation button.
+
+## G27 native support
+
+See [G27 support, button mapping and validation](docs/g27-protocol.md). The local
+test build is `build/adapter-g27.uf2`; it includes the Arduino load-cell brake.
+Native steering uses all 14 source bits. Force-feedback commands are queued in
+order and forwarded without changing their precision. Clutch, shifter, buttons,
+steering and force feedback have been validated with a physical G27 and GT7.
 
 ## External Arduino Micro brake
 
@@ -78,7 +91,7 @@ wrong report ID or length are ignored. Arduino HID interfaces are excluded from
 authentication selection. Other devices still use the original convention that
 a non-wheel device is the authentication controller; avoid additional unrelated
 HID peripherals on the hub. The licensed authentication controller is still
-required. Wheel native mode, clutch, shifter, and pedal curves are unchanged.
+required. No pedal response curves are applied.
 
 On Windows, inspect the device without additional packages or driver changes:
 
