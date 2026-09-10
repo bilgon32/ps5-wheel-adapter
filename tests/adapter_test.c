@@ -157,15 +157,31 @@ int main(void) {
     const uint8_t native[11]={8,0,4,0,0x80,255,255,0,128,255,0x9c};
     tuh_hid_report_received_cb(1,0,native,11); console_ready=true; hid_task();
     assert(report.clutch==0 && report.gears==4 && report.brake==0);
-    uint8_t native_ps[11]={8,0x30,0,0,0x80,255,255,255,128,128,0x9c};
+    uint8_t native_ps[11]={8,0x10,0,0,0x80,255,255,255,128,128,0x9c};
+    // Select is initially withheld while waiting for the other chord button.
     tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
-    assert(report.select && report.start && report.PS);
-    native_ps[1]=0x10; // Only the second red button (Select).
-    tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
-    assert(report.select && !report.start && !report.PS);
+    assert(!report.select && !report.start && !report.PS);
+    now += PS_SHORTCUT_CHORD_MS - 1;
+    hid_task(); assert(!report.select);
+    // Start joins inside the window: expose PS alone.
     native_ps[1]=0x30;
     tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
-    assert(report.select && report.start && report.PS);
+    assert(!report.select && !report.start && report.PS);
+    // Releasing Start first releases PS but continues consuming Select.
+    native_ps[1]=0x10;
+    tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
+    assert(!report.select && !report.start && !report.PS && ps_shortcut_latched);
+    native_ps[1]=0;
+    tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
+    assert(!ps_shortcut_latched && !report.select && !report.start && !report.PS);
+    // A lone Select remains usable after the short chord-detection delay.
+    native_ps[1]=0x10;
+    tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
+    now += PS_SHORTCUT_CHORD_MS;
+    hid_task(); assert(report.select && !report.start && !report.PS);
+    native_ps[1]=0;
+    tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
+    assert(!report.select);
     tuh_hid_report_received_cb(1,0,native_ps,0);
     assert(!wheel_receive_pending);
     state=SENDING_NONCE; nonce_part=0;

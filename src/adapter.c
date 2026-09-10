@@ -38,6 +38,12 @@ bool brake_receive_pending = false;
 external_brake_t external_brake = { 0 };
 uint16_t wheel_brake = BRAKE_G29_RELEASED;
 
+#define PS_SHORTCUT_CHORD_MS 75u
+bool wheel_select_raw, wheel_start_raw;
+bool ps_shortcut_latched;
+uint8_t ps_shortcut_pending, ps_shortcut_passthrough;
+uint32_t ps_shortcut_pending_at;
+
 bool busy = false;
 
 enum {
@@ -105,11 +111,73 @@ void wheel_controls_reset() {
     report.dpad = 8;
     report.pedal_reserved[0] = report.pedal_reserved[1] = 0xff;
     wheel_brake = BRAKE_G29_RELEASED;
+    wheel_select_raw = false;
+    wheel_start_raw = false;
+    ps_shortcut_latched = false;
+    ps_shortcut_pending = 0;
+    ps_shortcut_passthrough = 0;
+    ps_shortcut_pending_at = 0;
 }
 
 void report_init() {
     wheel_controls_reset();
     memcpy(&prev_report, &report, sizeof(report));
+}
+
+static void ps_shortcut_update(uint32_t now) {
+    uint8_t raw = (wheel_select_raw ? 1u : 0u) | (wheel_start_raw ? 2u : 0u);
+    report.select = false;
+    report.start = false;
+    report.PS = false;
+
+    // Once the chord is recognized, consume both buttons until both are up.
+    // This prevents a slightly later Select release from opening Share after PS.
+    if (ps_shortcut_latched) {
+        report.PS = raw == 3u;
+        if (!raw) ps_shortcut_latched = false;
+        return;
+    }
+
+    if (raw == 3u) {
+        // An individual button already exposed to the console remains a normal
+        // Start+Select combination. The PS chord must begin inside the window.
+        if (ps_shortcut_passthrough) {
+            report.select = true;
+            report.start = true;
+            return;
+        }
+        ps_shortcut_latched = true;
+        ps_shortcut_pending = 0;
+        report.PS = true;
+        return;
+    }
+
+    if (!raw) {
+        ps_shortcut_pending = 0;
+        ps_shortcut_passthrough = 0;
+        return;
+    }
+
+    if (ps_shortcut_passthrough == raw) {
+        report.select = (raw & 1u) != 0;
+        report.start = (raw & 2u) != 0;
+        return;
+    }
+
+    // Delay a lone button briefly so a near-simultaneous second press can turn
+    // it into the PS chord without ever exposing Select or Start to the PS5.
+    if (ps_shortcut_pending != raw) {
+        ps_shortcut_pending = raw;
+        ps_shortcut_pending_at = now;
+        ps_shortcut_passthrough = 0;
+        return;
+    }
+    if ((uint32_t) (now - ps_shortcut_pending_at) >= PS_SHORTCUT_CHORD_MS) {
+        ps_shortcut_passthrough = raw;
+        ps_shortcut_pending = 0;
+        report.select = (raw & 1u) != 0;
+        report.start = (raw & 2u) != 0;
+    }
 }
 
 void hid_task() {
@@ -119,7 +187,7 @@ void hid_task() {
 
     uint32_t now = adapter_millis();
     // On a G27, Select and Start are the second and third red shifter buttons.
-    report.PS = report.select && report.start;
+    ps_shortcut_update(now);
     report.brake = external_brake_value(&external_brake, wheel_brake, now);
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -540,7 +608,10 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             return;
         }
         if (wheel_pid == G27_PID) {
-            g27_decode(report_, len, &report, &wheel_brake);
+            if (g27_decode(report_, len, &report, &wheel_brake)) {
+                wheel_select_raw = report.select;
+                wheel_start_raw = report.start;
+            }
             return;
         }
         if (len >= sizeof(df_report_t)) {
@@ -559,6 +630,8 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R1 = df->R1;
             report.select = df->select;
             report.start = df->start;
+            wheel_select_raw = report.select;
+            wheel_start_raw = report.start;
             report.R3 = df->R3;
             report.L3 = df->L3;
         }

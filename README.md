@@ -42,7 +42,9 @@ The original binary uses Driving Force compatibility mode. Source builds now
 switch Logitech wheels using the `c294` compatibility identity into G27 native
 mode for clutch, H-shifter and independent
 wheel buttons; other wheels retain compatibility mode. Pressing “select” and
-“start” together works as the PlayStation button.
+“start” together works as the PlayStation button. Press them within 75 ms of
+each other; the firmware consumes both until they are released so the shortcut
+cannot also trigger the Share or Options actions.
 
 ## G27 native support
 

@@ -30,7 +30,10 @@ The D-pad direction numbering and neutral value remain unchanged.
 | H-shifter | Gears 1–6, neutral, reverse |
 
 Each mapped control is independent. Game assignments are configured in the G29
-controls screen.
+controls screen. Select and Start are delayed by 75 ms when pressed alone. If
+the other button joins during that window, the firmware reports only PS and
+suppresses both source buttons until both are released. This prevents a
+staggered chord release from opening Share or Options after the PS menu.
 
 ## Force feedback
 
