@@ -37,6 +37,8 @@ apply.
 - Optional Arduino Micro load-cell brake on the Rz axis.
 - Ordered, retryable Logitech force-feedback forwarding, including the legacy
   PS5 output-report layout.
+- Five on-the-fly G27 force-feedback response profiles with LED indication and
+  power-cycle recall.
 - Full-range pedal mapping without added curves, deadzones, or smoothing.
 - Host tests for report decoding, pedal calibration, device routing,
   authentication arbitration, native-mode switching, and force feedback.
@@ -171,8 +173,9 @@ then switches from the `046d:c294` compatibility identity to the native
 `046d:c29b` identity.
 
 The Pico LED turns off when the console begins authentication and turns on after
-the signed response is returned. During normal operation it should remain on
-most of the time.
+the signed response is returned. It also briefly blinks a force-feedback profile
+number at startup or after a profile change, then returns to authentication
+status.
 
 ## G27 controls
 
@@ -184,6 +187,12 @@ each other to send the PlayStation button. The firmware suppresses Select and
 Start until both are released, so releasing one before the other cannot open
 Share or Options. Pressing either button alone still works after the 75 ms chord
 detection delay.
+
+Hold the two **outer** red shifter buttons, L3 + R3, together for one second to
+cycle the force-feedback response. The firmware consumes the chord through
+release, blinks the Pico LED to identify the new profile, and remembers the
+selection across power cycles. Either button remains usable alone after the
+75 ms chord-detection delay.
 
 ## Optional Arduino load-cell brake
 
@@ -239,15 +248,38 @@ policy.
 
 ## Force feedback
 
-The adapter forwards the seven-byte Logitech force-feedback protocol without
-scaling its values. It preserves command order, retries failed downstream
-transfers, and blocks console commands that could switch the physical wheel out
-of native mode. PS5 control transfers use a legacy packet layout, which is
-handled as a fallback after normal G29 report parsing.
+The adapter preserves command order, retries failed downstream transfers, and
+blocks console commands that could switch the physical wheel out of native
+mode. PS5 control transfers use a legacy packet layout, which is handled as a
+fallback after normal G29 report parsing.
+
+For the G27, the adapter can reshape the signed level in Logitech steady-torque
+downloads and refreshes. Spring, damper, friction, range, RPM LED, mode, and
+unknown commands remain unchanged. The selectable profiles are:
+
+| Pico LED blinks | Profile | Behavior |
+| --- | --- | --- |
+| 1 | Linear | Passes constant force unchanged for comparison |
+| 2 | Minimum force 12% | Conservative deadzone compensation and the default on a fresh Pico |
+| 3 | Minimum force 18% | Stronger compensation for a G27 with a larger measured deadzone |
+| 4 | Progressive | Applies a smooth `x^0.65` low-force boost |
+| 5 | G27 measured LUT | Uses the inverse response measured from this project's G27 |
+
+Minimum-force profiles preserve exact zero and full-scale output. They compress
+the nonzero range instead of clipping strong forces. The setting is saved two
+seconds after a change in an append-only journal in the final 4 KiB flash
+sector. Reflashing a normal UF2 preserves it; fully erasing the Pico restores
+the 12% default.
 
 Native G27 mode provides 14-bit steering input. That is separate from motor
 resolution: constant force remains 8-bit and the protocol's high-resolution
 spring and damper parameters retain their original precision.
+
+The evidence, tradeoffs, protocol boundary, measured-LUT path, and validation
+plan are in
+[docs/ffb-deadzone-research.md](docs/ffb-deadzone-research.md).
+The original 101-point Assetto Corsa table is preserved as
+[profiles/g27-measured.lut](profiles/g27-measured.lut).
 
 ## Dependencies
 
@@ -277,5 +309,5 @@ ctest --test-dir build-host-tests --output-on-failure
 The suite covers normal and inverted load-cell calibration, invalid and stale
 reports, disconnect recovery, native G27 axes and buttons, gears and neutral,
 packed G29 offsets, the PlayStation-button chord, force-feedback ordering and
-overflow, failed sends, native-mode re-enumeration, and authentication
-arbitration.
+overflow, force-profile transforms and selection, failed sends, native-mode
+re-enumeration, and authentication arbitration.
