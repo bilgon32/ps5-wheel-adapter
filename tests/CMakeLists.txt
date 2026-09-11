@@ -3,7 +3,7 @@ project(brake_tests C)
 enable_testing()
 
 foreach(test_name brake_test adapter_test g27_test ffb_test)
-    add_executable(${test_name} ${test_name}.c ../src/brake.c ../src/g27.c ../src/ffb.c)
+    add_executable(${test_name} ${test_name}.c ../src/brake.c ../src/g27.c ../src/ffb.c ../src/profile_store.c)
     target_include_directories(${test_name} PRIVATE ../src stubs)
     target_compile_features(${test_name} PRIVATE c_std_11)
     if(MSVC)

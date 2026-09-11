@@ -17,6 +17,7 @@
 #include "brake.h"
 #include "g27.h"
 #include "ffb.h"
+#include "profile_store.h"
 
 uint8_t nonce_id;
 uint8_t nonce[280];
@@ -43,6 +44,19 @@ bool wheel_select_raw, wheel_start_raw;
 bool ps_shortcut_latched;
 uint8_t ps_shortcut_pending, ps_shortcut_passthrough;
 uint32_t ps_shortcut_pending_at;
+
+#define PROFILE_SHORTCUT_CHORD_MS 75u
+#define PROFILE_SHORTCUT_HOLD_MS 1000u
+bool wheel_l3_raw, wheel_r3_raw;
+bool profile_shortcut_holding, profile_shortcut_latched;
+uint8_t profile_shortcut_pending, profile_shortcut_passthrough;
+uint32_t profile_shortcut_pending_at, profile_shortcut_hold_at;
+profile_store_t profile_store;
+
+bool auth_led_on;
+bool profile_led_active, profile_led_on;
+uint8_t profile_led_pulses;
+uint32_t profile_led_deadline;
 
 bool busy = false;
 
@@ -80,6 +94,36 @@ static uint32_t adapter_millis(void) {
 #endif
 }
 
+static void adapter_led_set_auth(bool on) {
+    auth_led_on = on;
+    if (!profile_led_active) board_led_write(on);
+}
+
+static void adapter_led_show_profile(ffb_profile_t profile, uint32_t now) {
+    profile_led_active = true;
+    profile_led_on = true;
+    profile_led_pulses = (uint8_t) profile + 1u;
+    profile_led_deadline = now + 150u;
+    board_led_write(true);
+}
+
+static void adapter_led_task(uint32_t now) {
+    if (!profile_led_active || (int32_t) (now - profile_led_deadline) < 0) return;
+    if (profile_led_on) {
+        profile_led_on = false;
+        profile_led_pulses--;
+        board_led_write(false);
+        profile_led_deadline = now + 150u;
+    } else if (profile_led_pulses) {
+        profile_led_on = true;
+        board_led_write(true);
+        profile_led_deadline = now + 150u;
+    } else {
+        profile_led_active = false;
+        board_led_write(auth_led_on);
+    }
+}
+
 uint8_t get_buffer[64];
 uint8_t set_buffer[64];
 
@@ -113,10 +157,18 @@ void wheel_controls_reset() {
     wheel_brake = BRAKE_G29_RELEASED;
     wheel_select_raw = false;
     wheel_start_raw = false;
+    wheel_l3_raw = false;
+    wheel_r3_raw = false;
     ps_shortcut_latched = false;
     ps_shortcut_pending = 0;
     ps_shortcut_passthrough = 0;
     ps_shortcut_pending_at = 0;
+    profile_shortcut_holding = false;
+    profile_shortcut_latched = false;
+    profile_shortcut_pending = 0;
+    profile_shortcut_passthrough = 0;
+    profile_shortcut_pending_at = 0;
+    profile_shortcut_hold_at = 0;
 }
 
 void report_init() {
@@ -180,6 +232,84 @@ static void ps_shortcut_update(uint32_t now) {
     }
 }
 
+static void profile_shortcut_update(uint32_t now) {
+    uint8_t raw = (wheel_l3_raw ? 1u : 0u) | (wheel_r3_raw ? 2u : 0u);
+    report.L3 = false;
+    report.R3 = false;
+
+    if (wheel_pid != G27_PID) {
+        profile_shortcut_holding = false;
+        profile_shortcut_latched = false;
+        profile_shortcut_pending = 0;
+        profile_shortcut_passthrough = 0;
+        report.L3 = wheel_l3_raw;
+        report.R3 = wheel_r3_raw;
+        return;
+    }
+
+    if (profile_shortcut_latched) {
+        if (!raw) profile_shortcut_latched = false;
+        return;
+    }
+
+    if (profile_shortcut_holding) {
+        if (raw == 3u) {
+            if ((uint32_t) (now - profile_shortcut_hold_at) >= PROFILE_SHORTCUT_HOLD_MS) {
+                ffb_profile_t next = ffb_next_profile(ffb_queue.profile);
+                ffb_set_profile(&ffb_queue, next);
+                profile_store_schedule(&profile_store, (uint8_t) next, now);
+                adapter_led_show_profile(next, now);
+                printf("FFB profile: %s\n", ffb_profile_name(next));
+                profile_shortcut_holding = false;
+                profile_shortcut_latched = true;
+            }
+            return;
+        }
+        profile_shortcut_holding = false;
+        profile_shortcut_pending = 0;
+        profile_shortcut_passthrough = 0;
+    }
+
+    if (raw == 3u) {
+        // If a lone button was already exposed, retain the ordinary L3+R3
+        // combination. A profile change begins only inside the chord window.
+        if (profile_shortcut_passthrough) {
+            report.L3 = true;
+            report.R3 = true;
+            return;
+        }
+        profile_shortcut_holding = true;
+        profile_shortcut_hold_at = now;
+        profile_shortcut_pending = 0;
+        return;
+    }
+
+    if (!raw) {
+        profile_shortcut_pending = 0;
+        profile_shortcut_passthrough = 0;
+        return;
+    }
+
+    if (profile_shortcut_passthrough == raw) {
+        report.L3 = (raw & 1u) != 0;
+        report.R3 = (raw & 2u) != 0;
+        return;
+    }
+
+    if (profile_shortcut_pending != raw) {
+        profile_shortcut_pending = raw;
+        profile_shortcut_pending_at = now;
+        profile_shortcut_passthrough = 0;
+        return;
+    }
+    if ((uint32_t) (now - profile_shortcut_pending_at) >= PROFILE_SHORTCUT_CHORD_MS) {
+        profile_shortcut_passthrough = raw;
+        profile_shortcut_pending = 0;
+        report.L3 = (raw & 1u) != 0;
+        report.R3 = (raw & 2u) != 0;
+    }
+}
+
 void hid_task() {
     if (!tud_hid_ready()) {
         return;
@@ -188,6 +318,8 @@ void hid_task() {
     uint32_t now = adapter_millis();
     // On a G27, Select and Start are the second and third red shifter buttons.
     ps_shortcut_update(now);
+    // Hold the two outer red shifter buttons to cycle force-feedback profiles.
+    profile_shortcut_update(now);
     report.brake = external_brake_value(&external_brake, wheel_brake, now);
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -324,8 +456,10 @@ void wheel_init_task() {
     // UART diagnostics only; no USB identity/interface changes.
     if ((uint32_t) (now - wheel_last_diagnostic) >= 10000u) {
         wheel_last_diagnostic = now;
-        printf("FFB rx=%lu sent=%lu queued=%u peak=%u retries=%lu overflow=%lu blocked_modes=%lu\n",
-            (unsigned long) ffb_queue.received, (unsigned long) ffb_queue.sent,
+        printf("FFB profile=%s rx=%lu shaped=%lu sent=%lu queued=%u peak=%u retries=%lu overflow=%lu blocked_modes=%lu\n",
+            ffb_profile_name(ffb_queue.profile),
+            (unsigned long) ffb_queue.received, (unsigned long) ffb_queue.transformed,
+            (unsigned long) ffb_queue.sent,
             ffb_queue.count, ffb_queue.high_water, (unsigned long) wheel_tx_retries,
             (unsigned long) ffb_queue.overflows, (unsigned long) ffb_queue.blocked_mode_changes);
     }
@@ -384,6 +518,7 @@ void auth_task() {
 int main() {
     board_init();
     report_init();
+    ffb_set_profile(&ffb_queue, (ffb_profile_t) profile_store_init(&profile_store, FFB_PROFILE_MINIMUM_12));
 #ifndef _MSC_VER
     // Preserve the two-PIO layout used by the repository's proven 2023 host
     // stack. New Pico-PIO-USB defaults both engines to PIO0, which prevents the
@@ -398,6 +533,8 @@ int main() {
 #endif
     tusb_init();
     stdio_init_all();
+    printf("FFB profile: %s\n", ffb_profile_name(ffb_queue.profile));
+    adapter_led_show_profile(ffb_queue.profile, adapter_millis());
 
     while (1) {
         tuh_task();
@@ -406,6 +543,8 @@ int main() {
         hid_task();
         auth_task();
         wheel_init_task();
+        profile_store_task(&profile_store, adapter_millis());
+        adapter_led_task(adapter_millis());
     }
 
     return 0;
@@ -459,7 +598,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
     switch (report_id) {
         case 0x03:
             memcpy(buffer, output_0x03, reqlen);
-            board_led_write(false);
+            adapter_led_set_auth(false);
             return reqlen;
         case 0xF3:
             memcpy(buffer, output_0xf3, reqlen);
@@ -478,7 +617,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             if (signature_part == 19) {
                 signature_part = 0;
                 printf("\n");
-                board_led_write(true);
+                adapter_led_set_auth(true);
             }
             return reqlen;
         }
@@ -538,6 +677,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
         wheel_device = dev_addr;
         wheel_instance = instance;
         wheel_pid = pid;
+        ffb_enable_profiles(&ffb_queue, pid == G27_PID);
         // Logitech mode and setup commands use interrupt OUT. Keep interrupt IN
         // unarmed until setup finishes because this PIO host serializes wheel I/O.
         wheel_receive_pending = false;
@@ -579,6 +719,7 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
         wheel_receive_pending = false;
         wheel_tx_pending = false;
         wheel_tx_ffb = false;
+        ffb_enable_profiles(&ffb_queue, false);
         wheel_controls_reset();
         if (!expecting_native) ffb_clear(&ffb_queue);
     }
@@ -611,6 +752,8 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             if (g27_decode(report_, len, &report, &wheel_brake)) {
                 wheel_select_raw = report.select;
                 wheel_start_raw = report.start;
+                wheel_l3_raw = report.L3;
+                wheel_r3_raw = report.R3;
             }
             return;
         }
@@ -634,6 +777,8 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             wheel_start_raw = report.start;
             report.R3 = df->R3;
             report.L3 = df->L3;
+            wheel_l3_raw = report.L3;
+            wheel_r3_raw = report.R3;
         }
     }
 }

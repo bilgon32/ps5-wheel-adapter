@@ -20,12 +20,16 @@ add_executable(adapter
     src/brake.c
     src/g27.c
     src/ffb.c
+    src/profile_store.c
     src/descriptors.c
 )
 target_compile_features(adapter PRIVATE c_std_11)
+target_compile_definitions(adapter PRIVATE PICO_FLASH_ASSUME_CORE1_SAFE=1)
 target_include_directories(adapter PRIVATE src)
 target_link_libraries(adapter
     pico_stdlib
+    pico_flash
+    hardware_exception
     tinyusb_host
     tinyusb_device
     tinyusb_board

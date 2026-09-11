@@ -182,6 +182,27 @@ int main(void) {
     native_ps[1]=0;
     tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
     assert(!report.select);
+    // The outer red buttons form a deliberate one-second profile chord.
+    ffb_set_profile(&ffb_queue,FFB_PROFILE_LINEAR);
+    native_ps[1]=0xc0;
+    tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
+    assert(!report.L3 && !report.R3 && profile_shortcut_holding);
+    now += PROFILE_SHORTCUT_HOLD_MS;
+    hid_task();
+    assert(ffb_queue.profile==FFB_PROFILE_MINIMUM_12 && profile_shortcut_latched);
+    assert(!report.L3 && !report.R3);
+    native_ps[1]=0;
+    tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
+    assert(!profile_shortcut_latched);
+    // Either outer button remains available after the short chord window.
+    native_ps[1]=0x80;
+    tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
+    assert(!report.L3);
+    now += PROFILE_SHORTCUT_CHORD_MS;
+    hid_task(); assert(report.L3 && !report.R3);
+    native_ps[1]=0;
+    tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
+    assert(!report.L3);
     tuh_hid_report_received_cb(1,0,native_ps,0);
     assert(!wheel_receive_pending);
     state=SENDING_NONCE; nonce_part=0;
