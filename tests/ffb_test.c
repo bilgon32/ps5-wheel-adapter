@@ -82,6 +82,11 @@ int main(void) {
     assert(ffb_next_profile(FFB_PROFILE_PROGRESSIVE)==FFB_PROFILE_G27_MEASURED);
     assert(ffb_next_profile(FFB_PROFILE_G27_MEASURED)==FFB_PROFILE_LINEAR);
     assert(!strcmp(ffb_profile_name(FFB_PROFILE_MINIMUM_18),"Minimum force 18%"));
+    const uint8_t rpm_leds[]={0xf8,0x12,0x1f,0,0,0,0};
+    assert(ffb_enqueue_report(&q,5,rpm_leds,7));
+    assert(ffb_command_is_rpm_led(ffb_front(&q)));
+    ffb_suppress_front_led(&q);
+    assert(!q.count && q.suppressed_leds==1);
     profile_store_t store;
     assert(profile_store_init(&store,FFB_PROFILE_MINIMUM_12)==FFB_PROFILE_MINIMUM_12);
     profile_store_schedule(&store,FFB_PROFILE_PROGRESSIVE,100);

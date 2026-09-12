@@ -16,6 +16,7 @@
 #include "reports.h"
 #include "brake.h"
 #include "g27.h"
+#include "g27_leds.h"
 #include "ffb.h"
 #include "profile_store.h"
 
@@ -52,13 +53,18 @@ bool profile_shortcut_holding, profile_shortcut_latched;
 uint8_t profile_shortcut_pending, profile_shortcut_passthrough;
 uint32_t profile_shortcut_pending_at, profile_shortcut_hold_at;
 profile_store_t profile_store;
+g27_leds_t g27_leds;
 
 bool auth_led_on;
 bool profile_led_active, profile_led_on;
 uint8_t profile_led_pulses;
 uint32_t profile_led_deadline;
 
+#define AUTH_FFB_YIELD_MAX_MS 25u
 bool busy = false;
+bool auth_yield_for_ffb;
+uint32_t auth_yield_started_at;
+uint32_t auth_ffb_yields;
 
 enum {
     IDLE = 0,
@@ -77,7 +83,8 @@ typedef enum {
 } wheel_phase_t;
 wheel_phase_t wheel_phase = WHEEL_ABSENT;
 uint16_t wheel_pid;
-bool wheel_receive_pending, wheel_tx_pending, wheel_tx_ffb;
+bool wheel_receive_pending, wheel_tx_pending, wheel_tx_ffb, wheel_tx_led;
+uint8_t wheel_tx_led_mask;
 bool expecting_native;
 uint8_t wheel_mode_failures;
 uint8_t wheel_init_failures;
@@ -174,6 +181,7 @@ void wheel_controls_reset() {
 void report_init() {
     wheel_controls_reset();
     memcpy(&prev_report, &report, sizeof(report));
+    g27_leds_init(&g27_leds);
 }
 
 static void ps_shortcut_update(uint32_t now) {
@@ -259,6 +267,7 @@ static void profile_shortcut_update(uint32_t now) {
                 ffb_set_profile(&ffb_queue, next);
                 profile_store_schedule(&profile_store, (uint8_t) next, now);
                 adapter_led_show_profile(next, now);
+                g27_leds_show_profile(&g27_leds, (uint8_t) next + 1u, now);
                 printf("FFB profile: %s\n", ffb_profile_name(next));
                 profile_shortcut_holding = false;
                 profile_shortcut_latched = true;
@@ -352,6 +361,7 @@ static void wheel_command_succeeded() {
         case WHEEL_RANGE: wheel_phase = WHEEL_LEDS_OFF; break;
         case WHEEL_LEDS_OFF:
             wheel_phase = WHEEL_READY;
+            g27_leds_show_ready(&g27_leds, adapter_millis());
             printf("G27 native inputs and FFB ready\n");
             break;
         default: break;
@@ -423,6 +433,7 @@ void wheel_init_task() {
         if (wheel_tx_pending) return;
         if (busy || !deadline_reached(now, wheel_tx_retry_at)) return;
         wheel_tx_ffb = false;
+        wheel_tx_led = false;
         if (tuh_hid_send_report(wheel_device, wheel_instance, 0, command, FFB_COMMAND_SIZE)) {
             wheel_tx_pending = true;
             if (wheel_phase == WHEEL_SWITCH_NATIVE) {
@@ -442,9 +453,43 @@ void wheel_init_task() {
         wheel_receive_pending = tuh_hid_receive_report(wheel_device, wheel_instance);
         if (!wheel_receive_pending) wheel_receive_retry_at = now + 10u;
     }
+    bool brake_fault = external_brake.selected &&
+        (!external_brake.connected || !external_brake.has_sample ||
+         (uint32_t) (now - external_brake.updated_ms) >= BRAKE_TIMEOUT_MS);
+    g27_leds_set_conditions(&g27_leds, auth_device != 0, brake_fault, now);
+
+    // Status indications own the decorative RPM LEDs while active. Discard
+    // game LED updates during the overlay so they cannot erase a fault or
+    // profile indication; all force and setup commands retain their order.
+    while (g27_leds_override_is_active(&g27_leds, now) &&
+           ffb_command_is_rpm_led(ffb_front(&ffb_queue))) {
+        ffb_suppress_front_led(&ffb_queue);
+    }
+
     command = ffb_front(&ffb_queue);
+    // After every authentication packet, give one queued force command a
+    // chance to reach the wheel. Without this turn, the complete signing
+    // exchange monopolizes the serialized PIO USB host and the wheel goes numb.
+    bool ffb_has_auth_priority = auth_yield_for_ffb && command;
+    uint8_t led_mask;
+    bool led_due = !ffb_has_auth_priority && g27_leds_command_due(&g27_leds, now, &led_mask);
+    static uint8_t led_command[FFB_COMMAND_SIZE] = { 0xf8, 0x12, 0, 0, 0, 0, 0 };
+    if (led_due && !wheel_tx_pending && !busy && deadline_reached(now, wheel_tx_retry_at)) {
+        led_command[2] = led_mask;
+        wheel_tx_ffb = false;
+        wheel_tx_led = true;
+        wheel_tx_led_mask = led_mask;
+        if (tuh_hid_send_report(wheel_device, wheel_instance, 0, led_command, FFB_COMMAND_SIZE)) {
+            wheel_tx_pending = true;
+            return;
+        }
+        wheel_tx_led = false;
+        wheel_tx_retries++;
+        wheel_tx_retry_at = now + 10u;
+    }
     if (command && !wheel_tx_pending && !busy && deadline_reached(now, wheel_tx_retry_at)) {
         wheel_tx_ffb = true;
+        wheel_tx_led = false;
         if (tuh_hid_send_report(wheel_device, wheel_instance, 0, command, FFB_COMMAND_SIZE)) {
             wheel_tx_pending = true;
             return;
@@ -456,12 +501,14 @@ void wheel_init_task() {
     // UART diagnostics only; no USB identity/interface changes.
     if ((uint32_t) (now - wheel_last_diagnostic) >= 10000u) {
         wheel_last_diagnostic = now;
-        printf("FFB profile=%s rx=%lu shaped=%lu sent=%lu queued=%u peak=%u retries=%lu overflow=%lu blocked_modes=%lu\n",
+        printf("FFB profile=%s rx=%lu shaped=%lu sent=%lu queued=%u peak=%u retries=%lu overflow=%lu auth_yields=%lu led_suppressed=%lu blocked_modes=%lu\n",
             ffb_profile_name(ffb_queue.profile),
             (unsigned long) ffb_queue.received, (unsigned long) ffb_queue.transformed,
             (unsigned long) ffb_queue.sent,
             ffb_queue.count, ffb_queue.high_water, (unsigned long) wheel_tx_retries,
-            (unsigned long) ffb_queue.overflows, (unsigned long) ffb_queue.blocked_mode_changes);
+            (unsigned long) ffb_queue.overflows, (unsigned long) auth_ffb_yields,
+            (unsigned long) ffb_queue.suppressed_leds,
+            (unsigned long) ffb_queue.blocked_mode_changes);
     }
 }
 
@@ -473,6 +520,11 @@ void tuh_hid_report_sent_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* d
         if (wheel_tx_ffb) {
             wheel_tx_retries++;
             wheel_tx_retry_at = adapter_millis() + 10u;
+            auth_yield_for_ffb = false;
+        } else if (wheel_tx_led) {
+            wheel_tx_retries++;
+            wheel_tx_retry_at = adapter_millis() + 10u;
+            wheel_tx_led = false;
         } else {
             wheel_setup_command_failed(adapter_millis());
         }
@@ -480,6 +532,13 @@ void tuh_hid_report_sent_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* d
     }
     if (wheel_tx_ffb) {
         ffb_pop(&ffb_queue);
+        if (auth_yield_for_ffb) auth_ffb_yields++;
+        auth_yield_for_ffb = false;
+        return;
+    }
+    if (wheel_tx_led) {
+        wheel_tx_led = false;
+        g27_leds_command_sent(&g27_leds, wheel_tx_led_mask, adapter_millis());
         return;
     }
     wheel_mode_failures = 0;
@@ -488,6 +547,15 @@ void tuh_hid_report_sent_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* d
 }
 
 void auth_task() {
+    uint32_t now = adapter_millis();
+    if (auth_yield_for_ffb) {
+        if (!wheel_device || wheel_phase != WHEEL_READY || !ffb_front(&ffb_queue) ||
+            (uint32_t) (now - auth_yield_started_at) >= AUTH_FFB_YIELD_MAX_MS) {
+            auth_yield_for_ffb = false;
+        } else {
+            return;
+        }
+    }
     if (!busy && !wheel_tx_pending && auth_device) {
         switch (state) {
             case IDLE:
@@ -503,7 +571,6 @@ void auth_task() {
                 memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
                 printf(".");
                 busy = tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
-                if (busy) nonce_part++;
                 break;
             case WAITING_FOR_SIG:
                 busy = tuh_hid_get_report(auth_device, auth_instance, 0xF2, HID_REPORT_TYPE_FEATURE, get_buffer, 15 + 1);
@@ -513,6 +580,12 @@ void auth_task() {
                 break;
         }
     }
+}
+
+static void auth_transfer_finished(void) {
+    busy = false;
+    auth_yield_for_ffb = true;
+    auth_yield_started_at = adapter_millis();
 }
 
 int main() {
@@ -551,14 +624,17 @@ int main() {
 }
 
 void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t report_id, uint8_t report_type, uint16_t len) {
-    if (dev_addr == auth_device) {
-        busy = false;
+    (void) report_type;
+    if (dev_addr == auth_device && idx == auth_instance) {
+        auth_transfer_finished();
         switch (report_id) {
             case 0xF3:
+                if (state != SENDING_RESET || len < 8u) break;
                 printf("Sending nonce to auth controller");
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
+                if (state != WAITING_FOR_SIG || len < 16u) break;
                 // printf(".");
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
@@ -568,6 +644,7 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                 }
                 break;
             case 0xF1:
+                if (state != RECEIVING_SIG || len < 64u) break;
                 memcpy(signature + (signature_part * 56), get_buffer + 4, 56);
                 signature_part++;
                 printf(".");
@@ -584,9 +661,12 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
 }
 
 void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t report_id, uint8_t report_type, uint16_t len) {
-    if ((dev_addr == auth_device) && (report_id == 0xF0)) {
-        busy = false;
-        if (nonce_part == 5) {
+    (void) report_type;
+    if (dev_addr == auth_device && idx == auth_instance && report_id == 0xF0) {
+        auth_transfer_finished();
+        if (state != SENDING_NONCE || len < 64u) return;
+        nonce_part++;
+        if (nonce_part == 5u) {
             printf("\n");
             printf("Waiting for auth controller to sign...\n");
             state = WAITING_FOR_SIG;
@@ -595,19 +675,28 @@ void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
+    (void) itf;
+    (void) report_type;
+    if (!buffer) return 0;
     switch (report_id) {
-        case 0x03:
-            memcpy(buffer, output_0x03, reqlen);
+        case 0x03: {
+            uint16_t length = reqlen < sizeof(output_0x03) ? reqlen : sizeof(output_0x03);
+            memcpy(buffer, output_0x03, length);
             adapter_led_set_auth(false);
-            return reqlen;
-        case 0xF3:
-            memcpy(buffer, output_0xf3, reqlen);
+            return length;
+        }
+        case 0xF3: {
+            uint16_t length = reqlen < sizeof(output_0xf3) ? reqlen : sizeof(output_0xf3);
+            memcpy(buffer, output_0xf3, length);
             signature_ready = false;
-            return reqlen;
+            return length;
+        }
         case 0xF1: {  // GET_SIGNATURE_NONCE
+            uint16_t length = reqlen < 63u ? reqlen : 63u;
+            memset(buffer, 0, length);
+            if (length < 59u) return length;
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
-            buffer[2] = 0;
             if (signature_part == 0) {
                 printf("Sending signature to PS5");
             }
@@ -618,28 +707,36 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
                 signature_part = 0;
                 printf("\n");
                 adapter_led_set_auth(true);
+                g27_leds_show_ready(&g27_leds, adapter_millis());
             }
-            return reqlen;
+            return length;
         }
         case 0xF2: {  // GET_SIGNING_STATE
+            uint16_t length = reqlen < 15u ? reqlen : 15u;
+            if (length < 2u) return length;
             printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
-            memset(&buffer[2], 0, 9);
-            return reqlen;
+            if (length > 2u) memset(&buffer[2], 0, length - 2u);
+            return length;
         }
     }
     return reqlen;
 }
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
+    (void) itf;
+    (void) report_type;
     if (report_id == 0xF0) {  // SET_AUTH_PAYLOAD
+        if (!buffer || bufsize < 59u) return;
         uint8_t part = expected_part;
         if (bufsize == 63) {
             nonce_id = buffer[0];
             part = buffer[1];
         }
         if (part == 0) {
+            nonce_ready = false;
+            signature_ready = false;
             printf("Getting nonce from PS5");
         }
         printf(".");
@@ -683,6 +780,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
         wheel_receive_pending = false;
         wheel_tx_pending = false;
         wheel_tx_ffb = false;
+        wheel_tx_led = false;
         wheel_mode_failures = 0;
         wheel_init_failures = 0;
         wheel_tx_retry_at = 0;
@@ -719,6 +817,8 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
         wheel_receive_pending = false;
         wheel_tx_pending = false;
         wheel_tx_ffb = false;
+        wheel_tx_led = false;
+        auth_yield_for_ffb = false;
         ffb_enable_profiles(&ffb_queue, false);
         wheel_controls_reset();
         if (!expecting_native) ffb_clear(&ffb_queue);
@@ -731,8 +831,16 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
         printf("External brake disconnected; brake released until reconnect\n");
     }
     if ((dev_addr == auth_device) && (instance == auth_instance)) {
+        bool transaction_pending = state != IDLE;
         auth_device = 0;
         auth_instance = 0;
+        busy = false;
+        auth_yield_for_ffb = false;
+        nonce_part = 0;
+        signature_part = 0;
+        signature_ready = false;
+        state = transaction_pending && nonce_ready ? SENDING_RESET : IDLE;
+        printf("Authentication controller disconnected\n");
     }
 }
 

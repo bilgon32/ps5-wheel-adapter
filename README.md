@@ -177,6 +177,20 @@ the signed response is returned. It also briefly blinks a force-feedback profile
 number at startup or after a profile change, then returns to authentication
 status.
 
+In native G27 mode, the five RPM LED segments provide status where they are
+visible from the driving position:
+
+| G27 RPM LED pattern | Meaning |
+| --- | --- |
+| Bar fills from one to five segments | Native mode is ready, or authentication just completed |
+| One to five segments flash twice, then remain lit briefly | Selected force-feedback profile number |
+| Two outer segments blink slowly | Authentication controller is missing |
+| All five segments blink rapidly | The selected external brake is disconnected, has not reported, or timed out |
+
+Status patterns temporarily override GT7's decorative RPM indication. Game RPM
+commands are suppressed during a pattern, and normal game control resumes after
+the status clears.
+
 ## G27 controls
 
 Native mode enables the clutch, H-shifter, and independent wheel buttons. The
@@ -253,6 +267,11 @@ blocks console commands that could switch the physical wheel out of native
 mode. PS5 control transfers use a legacy packet layout, which is handled as a
 fallback after normal G29 report parsing.
 
+Periodic PS5 authentication packets share the downstream USB bus with the
+wheel. The scheduler sends one queued force-feedback command between
+authentication packets, preventing the signing exchange from starving the
+wheel and replaying a backlog of stale forces.
+
 For the G27, the adapter can reshape the signed level in Logitech steady-torque
 downloads and refreshes. Spring, damper, friction, range, RPM LED, mode, and
 unknown commands remain unchanged. The selectable profiles are:
@@ -309,5 +328,5 @@ ctest --test-dir build-host-tests --output-on-failure
 The suite covers normal and inverted load-cell calibration, invalid and stale
 reports, disconnect recovery, native G27 axes and buttons, gears and neutral,
 packed G29 offsets, the PlayStation-button chord, force-feedback ordering and
-overflow, force-profile transforms and selection, failed sends, native-mode
-re-enumeration, and authentication arbitration.
+overflow, force-profile transforms and selection, G27 status patterns, failed
+sends, native-mode re-enumeration, and fair authentication arbitration.

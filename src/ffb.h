@@ -19,7 +19,7 @@ typedef enum {
 typedef struct {
     uint8_t commands[FFB_QUEUE_CAPACITY][FFB_COMMAND_SIZE];
     uint16_t head, count, high_water;
-    uint32_t received, sent, transformed, overflows, blocked_mode_changes, invalid;
+    uint32_t received, sent, transformed, suppressed_leds, overflows, blocked_mode_changes, invalid;
     ffb_profile_t profile;
     bool profiles_enabled;
 } ffb_queue_t;
@@ -29,7 +29,9 @@ typedef struct {
 bool ffb_enqueue_report(ffb_queue_t* queue, uint8_t report_id, const uint8_t* data, size_t length);
 const uint8_t* ffb_front(const ffb_queue_t* queue);
 void ffb_pop(ffb_queue_t* queue);
+void ffb_suppress_front_led(ffb_queue_t* queue);
 void ffb_clear(ffb_queue_t* queue);
+bool ffb_command_is_rpm_led(const uint8_t* command);
 bool ffb_profile_valid(uint8_t profile);
 void ffb_set_profile(ffb_queue_t* queue, ffb_profile_t profile);
 void ffb_enable_profiles(ffb_queue_t* queue, bool enabled);

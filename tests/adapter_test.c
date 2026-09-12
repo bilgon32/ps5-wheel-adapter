@@ -14,7 +14,7 @@ static uint8_t receive_device, receive_instance;
 static bool accept_host=true, console_ready=true;
 static uint16_t mock_wheel_pid=DRIVING_FORCE_PID;
 static uint8_t last_command[7];
-static unsigned host_sends, control_sends;
+static unsigned host_sends, control_sends, auth_sends;
 static tuh_xfer_cb_t descriptor_callback;
 static uintptr_t descriptor_generation;
 bool tuh_descriptor_get_device(uint8_t d, void* p, uint16_t l, tuh_xfer_cb_t cb, uintptr_t user) {
@@ -31,8 +31,8 @@ void board_led_write(bool on) { (void) on; }
 bool tud_hid_ready(void) { return console_ready; }
 bool tud_hid_report(uint8_t id, const void* data, uint16_t length) { assert(id == 1); (void) data; (void) length; send_calls++; return accept_send; }
 bool tuh_hid_send_report(uint8_t d, uint8_t i, uint8_t id, const void* p, uint16_t l) { assert(d==1 && i==0 && id==0 && l==7); memcpy(last_command,p,7); host_sends++; return accept_host; }
-bool tuh_hid_get_report(uint8_t d, uint8_t i, uint8_t id, uint8_t t, void* p, uint16_t l) { (void)d; (void)i; (void)id; (void)t; (void)p; (void)l; return true; }
-bool tuh_hid_set_report(uint8_t d, uint8_t i, uint8_t id, uint8_t t, const void* p, uint16_t l) { (void)i; if(d==1) { assert(id==0 && t==HID_REPORT_TYPE_OUTPUT && l==7); memcpy(last_command,p,7); control_sends++; } return accept_host; }
+bool tuh_hid_get_report(uint8_t d, uint8_t i, uint8_t id, uint8_t t, void* p, uint16_t l) { (void)d; (void)i; (void)id; (void)t; (void)p; (void)l; auth_sends++; return true; }
+bool tuh_hid_set_report(uint8_t d, uint8_t i, uint8_t id, uint8_t t, const void* p, uint16_t l) { (void)i; if(d==1) { assert(id==0 && t==HID_REPORT_TYPE_OUTPUT && l==7); memcpy(last_command,p,7); control_sends++; } else { auth_sends++; } return accept_host; }
 bool tuh_hid_receive_report(uint8_t device, uint8_t instance) {
     receive_calls++; receive_device = device; receive_instance = instance; return accept_receive;
 }
@@ -140,6 +140,16 @@ int main(void) {
         now += 20;
     }
     assert(wheel_phase==WHEEL_READY);
+    external_brake.selected=false;
+    // Native-ready status sweeps the wheel's RPM LEDs before ordinary traffic.
+    console_ready=false; accept_host=true; accept_receive=false; wheel_init_task();
+    assert(wheel_tx_pending && wheel_tx_led && last_command[0]==0xf8 &&
+        last_command[1]==0x12 && last_command[2]==0x01);
+    tuh_hid_report_sent_cb(1,0,last_command,7);
+    now += 840;
+    wheel_init_task();
+    assert(wheel_tx_pending && wheel_tx_led && last_command[2]==0);
+    tuh_hid_report_sent_cb(1,0,last_command,7);
     console_ready=false; accept_host=false; accept_receive=false; wheel_init_task();
     assert(ffb_queue.count==1 && !wheel_tx_pending && !wheel_receive_pending);
     now += 10;
@@ -154,6 +164,8 @@ int main(void) {
     wheel_init_task();
     assert(wheel_receive_pending && !wheel_tx_pending);
     // Clutch and gears coexist with the independent external brake.
+    external_brake.selected=true; external_brake.connected=true;
+    external_brake.has_sample=true; external_brake.value=0; external_brake.updated_ms=now;
     const uint8_t native[11]={8,0,4,0,0x80,255,255,0,128,255,0x9c};
     tuh_hid_report_received_cb(1,0,native,11); console_ready=true; hid_task();
     assert(report.clutch==0 && report.gears==4 && report.brake==0);
@@ -203,12 +215,41 @@ int main(void) {
     native_ps[1]=0;
     tuh_hid_report_received_cb(1,0,native_ps,11); hid_task();
     assert(!report.L3);
+    // Feature replies honor their descriptor sizes and initialize every byte.
+    uint8_t feature_reply[16]; memset(feature_reply,0xaa,sizeof(feature_reply));
+    assert(tud_hid_get_report_cb(0,0xf2,HID_REPORT_TYPE_FEATURE,feature_reply,16)==15);
+    for(unsigned i=2;i<15;i++) assert(feature_reply[i]==0);
+    assert(feature_reply[15]==0xaa);
+    memset(feature_reply,0xaa,sizeof(feature_reply));
+    assert(tud_hid_get_report_cb(0,0xf3,HID_REPORT_TYPE_FEATURE,feature_reply,16)==7);
+    assert(feature_reply[7]==0xaa);
     tuh_hid_report_received_cb(1,0,native_ps,0);
     assert(!wheel_receive_pending);
-    state=SENDING_NONCE; nonce_part=0;
+    // Authentication submission advances only after a successful completion.
+    state=SENDING_NONCE; nonce_ready=true; nonce_part=0;
     accept_host=false; auth_task(); assert(nonce_part==0 && !busy);
-    accept_host=true; auth_task(); assert(nonce_part==1 && busy);
+    accept_host=true; auth_task(); assert(nonce_part==0 && busy);
+    tuh_hid_set_report_complete_cb(3,0,0xf0,HID_REPORT_TYPE_FEATURE,0);
+    assert(nonce_part==0 && state==SENDING_NONCE); // Failed transfer retries the same part.
+    auth_task(); assert(busy);
+    tuh_hid_set_report_complete_cb(3,0,0xf0,HID_REPORT_TYPE_FEATURE,64);
+    assert(nonce_part==1 && !busy && auth_yield_for_ffb);
+
+    // A live force packet gets one turn before the next auth packet, avoiding
+    // the periodic one-second FFB dropout during signing.
+    const uint8_t live_force[]={0x11,0x08,140,128,0,0,0};
+    assert(ffb_enqueue_report(&ffb_queue,5,live_force,7));
+    unsigned auth_calls=auth_sends;
+    auth_task(); assert(!busy && auth_sends==auth_calls);
+    wheel_init_task(); assert(wheel_tx_pending && wheel_tx_ffb);
+    tuh_hid_report_sent_cb(1,0,last_command,7);
+    assert(!auth_yield_for_ffb && auth_ffb_yields==1 && !ffb_queue.count);
+    auth_task(); assert(busy);
+
+    // Removing the authentication controller cannot leave wheel output locked.
+    tuh_hid_umount_cb(3,0);
+    assert(!busy && !auth_device && state==SENDING_RESET);
     tuh_hid_umount_cb(1,0); assert(report.clutch==65535 && report.gears==0);
-    puts("Adapter brake routing, native switch, authentication arbitration and FFB retries passed.");
+    puts("Adapter routing, G27 LEDs, fair authentication and FFB retries passed.");
     return 0;
 }

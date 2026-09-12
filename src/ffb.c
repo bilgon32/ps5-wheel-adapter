@@ -140,6 +140,17 @@ void ffb_pop(ffb_queue_t* queue) {
     queue->sent++;
 }
 
+bool ffb_command_is_rpm_led(const uint8_t* command) {
+    return command && command[0] == 0xf8u && command[1] == 0x12u;
+}
+
+void ffb_suppress_front_led(ffb_queue_t* queue) {
+    if (!queue || !queue->count || !ffb_command_is_rpm_led(queue->commands[queue->head])) return;
+    queue->head = (queue->head + 1u) % FFB_QUEUE_CAPACITY;
+    queue->count--;
+    queue->suppressed_leds++;
+}
+
 void ffb_clear(ffb_queue_t* queue) {
     queue->head = 0;
     queue->count = 0;

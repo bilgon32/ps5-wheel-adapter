@@ -19,6 +19,7 @@ add_executable(adapter
     src/adapter.c
     src/brake.c
     src/g27.c
+    src/g27_leds.c
     src/ffb.c
     src/profile_store.c
     src/descriptors.c
