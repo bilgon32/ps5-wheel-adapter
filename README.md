@@ -1,332 +1,133 @@
-# PS5 wheel adapter with native Logitech G27 support
+# G27 Studio
 
-This firmware lets a Raspberry Pi Pico present an older Logitech wheel to a
-PlayStation 5 as a Logitech G29. It uses a licensed PS4 specialty controller for
-authentication and supports an optional standalone load-cell brake connected
-through an Arduino Micro.
+**Your wheel. Your feel.** A Raspberry Pi Pico adapter and Windows app for using
+the Logitech G27 on PS5, with guided setup and configurable USB load-cell braking.
 
-The project runs entirely over USB. It does not use Remote Play.
+[Download releases](https://github.com/bilgon32/ps5-wheel-adapter/releases) ·
+[Preview builds](https://github.com/bilgon32/ps5-wheel-adapter/actions) ·
+[Developer guide](docs/development.md)
 
-## Origin, credit, and license
+![G27 Studio live dashboard](docs/images/studio-dashboard.png)
 
-This repository is a personal fork of
-[jfedor2/wheel-adapter](https://github.com/jfedor2/wheel-adapter). The original
-adapter design, PS5 authentication implementation, wiring instructions, photos,
-and initial Logitech compatibility support were created by
-[Jan Fedor](https://github.com/jfedor2). The original commit history and
-dependency submodules are preserved.
+*Actual application screenshot in its labelled demo mode. Connect your Pico for
+live measurements from your own devices.*
 
-This fork adds native G27 operation, standalone load-cell braking, a more robust
-force-feedback bridge, and automated tests. Protocol details were cross-checked
-against the Linux Logitech wheel driver and GIMX; the specific references and
-control mapping are documented in
-[docs/g27-protocol.md](docs/g27-protocol.md).
+## What it does
 
-The upstream repository does not contain a project-wide license. This fork does
-not relicense the upstream code or grant additional rights to it. File-level
-copyright notices and the separate licenses of each dependency continue to
-apply.
+- Native G27 steering, clutch, H-shifter, and independent wheel buttons.
+- PS5 authentication through a compatible licensed PS4 specialty controller.
+- USB load-cell brake selection, axis discovery, and guided calibration.
+- Five force-feedback profiles, including standard operation and an imported LUT.
+- Live steering, pedal graphs, and gear display for testing your setup.
+- Settings backup, personalized UF2 export, and Pico installation from the app.
+- Wheel LED status and force-profile selection remembered across power cycles.
 
-## Additions in this fork
-
-- Native Logitech G27 mode with 14-bit steering input.
-- Working clutch pedal and H-pattern gears 1–6, neutral, and reverse.
-- Independent G27 wheel and shifter buttons instead of G25-style duplicates.
-- Select + Start PlayStation-button shortcut that consumes both source buttons
-  until release, preventing unwanted Share or Options menus.
-- Optional Arduino Micro load-cell brake on the Rz axis.
-- Ordered, retryable Logitech force-feedback forwarding, including the legacy
-  PS5 output-report layout.
-- Five on-the-fly G27 force-feedback response profiles with LED indication and
-  power-cycle recall.
-- Full-range pedal mapping without added curves, deadzones, or smoothing.
-- Host tests for report decoding, pedal calibration, device routing,
-  authentication arbitration, native-mode switching, and force feedback.
-
-The G27 controls, clutch, shifter, external brake, PlayStation shortcut, and
-force feedback have been tested with Gran Turismo 7 on PS5.
-
-## Compatibility
-
-| Device | Support in this fork |
-| --- | --- |
-| Logitech G27 | Fully tested in native mode, including inputs and force feedback |
-| Logitech Driving Force Pro | Tested by the upstream author; retained through compatibility mode, not retested here |
-| Logitech G25 and other older wheels with Driving Force compatibility mode | Expected to retain upstream basic-wheel support, not hardware-tested here |
-| Logitech G29 as the physical wheel | Not supported; G29 is the identity emulated toward the console |
-| Arduino Micro load-cell brake | Tested with the exact `2341:8037` HID profile described below |
-| DualShock 4 for authentication | Not supported |
-| Licensed PS4 specialty controllers | Required; fight pads and arcade sticks that work in PS5 games are typical candidates |
-
-Game behavior still matters. In GT7, clutch operation requires manual
-transmission mode and a car whose transmission supports a clutch. USB hub
-compatibility also varies, so another hub is worth trying when downstream
-devices fail to enumerate.
+The adapter runs over USB; it does not use Remote Play. **G27 is the current
+wheel target. Handbrakes and other wheel models are outside this release.**
 
 ## What you need
 
-- Raspberry Pi Pico or a compatible RP2040 board.
-- USB Type-A female connector, from either a breakout board or a cut extension
-  cable.
-- USB hub for the wheel, authentication controller, and optional Arduino.
-- Supported Logitech wheel with its normal power supply.
-- Officially licensed PS4 specialty controller that works in PS5 games.
-- Optional Arduino Micro exposing the supported load-cell HID report.
-- Soldering equipment, or a Pico with headers, breadboard, breakout board, and
-  jumper wires.
+- Logitech G27 with its power supply, pedals, and shifter.
+- Raspberry Pi Pico (RP2040, 2 MB flash) with an added USB host port.
+- USB hub and USB data cables.
+- Compatible licensed PS4 specialty controller for authentication.
+- Windows 10/11 x64 for G27 Studio.
+- Optional USB load-cell pedal device, such as an Arduino Micro.
 
-This fork is successfully tested with a **Hori Wired Controller Light for PS4**
-for authentication. The Razer Raion was used by the upstream author. A standard
-DualShock 4 does not satisfy this adapter's authentication requirement.
+**Hori Wired Controller Light for PS4 is successfully used for authentication in
+our tests.** A standard DualShock 4 does not work for this purpose.
 
-## Hardware assembly
+The app bundles its firmware and Python runtime. No compiler or Python
+installation is needed. Its window uses Microsoft Edge WebView2; if Windows
+reports that runtime missing, install it from
+[Microsoft](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
 
-Add a downstream USB port to the Pico using these connections:
+## Connect your setup
 
-| Raspberry Pi Pico | USB port or cable |
+![Where to connect the wheel, controller, pedals, and Pico](docs/images/connections.svg)
+
+The wheel, controller, and optional pedal device stay connected to the Pico’s
+downstream hub. The Pico’s built-in USB port connects to **the PC for setup** or
+**the PS5 for driving**.
+
+If you are assembling an adapter, wire its added USB Type-A port as shown:
+
+![Pico USB host port wiring](docs/images/wiring.svg)
+
+Use connector labels and physical pin numbers; cable colors are not guaranteed.
+Keep the wheel on its normal power supply.
+
+## Install, configure, drive
+
+1. Download the Windows ZIP from **Releases**, extract the whole archive, and open
+   `G27-Studio.exe` inside the extracted folder.
+2. For first installation, hold the Pico’s **BOOTSEL** button while connecting
+   its built-in USB port to the PC. In **Install & backup**, choose **RPI-RP2**
+   and install the bundled firmware.
+3. Click **Connect Pico**. Choose **Open setup mode** if the adapter currently
+   appears in console mode. Firmware predating G27 Studio needs the first
+   BOOTSEL installation before this option works.
+4. In **Devices & pedals**, select your authentication controller and brake
+   source. For a USB load cell, choose its device, press it to identify the axis,
+   and capture released and pressed positions if needed. The original G27 brake
+   needs no additional configuration.
+5. Check your inputs on **Live dashboard**. Choose a profile or import your
+   measured `.lut` under **Force feedback**. **Test without saving** lets you
+   check settings before keeping them.
+6. Choose **Save & switch to console**, then move the Pico’s built-in USB cable
+   to the PS5. Keep the wheel, controller, and pedals on the hub.
+
+You can also export a personalized `.uf2` containing firmware and your settings,
+or a small settings backup. Future configuration changes do not require building
+source code.
+
+![Guided device and pedal setup](docs/images/studio-devices.png)
+
+## While driving
+
+- **PS button:** press the two middle red shifter buttons together.
+- **Change force profile:** hold the two outer red shifter buttons for one second.
+- **Clutch in GT7:** use manual transmission and a car that supports a clutch.
+
+| Wheel LED indication | Meaning |
 | --- | --- |
-| GPIO0, physical pin 1 | D+; commonly green |
-| GPIO1, physical pin 2 | D-; commonly white |
-| VBUS, physical pin 40 | VBUS / 5 V |
-| GND, physical pin 38 | Ground |
+| Bar fills from one to five segments | Native G27 ready or authentication completed |
+| One to five segments flash | Selected force profile: linear, 12%, 18%, progressive, measured LUT |
+| Two outer segments blink slowly | Authentication controller missing |
+| All segments blink rapidly | Selected external brake missing or not reporting |
 
-Cable colors are common conventions rather than guarantees; verify the cable or
-breakout board labels.
+Status patterns temporarily take priority over the game’s RPM decoration.
 
-![Two hardware assembly options](hardware.jpg)
+![Force-feedback response profiles](docs/images/studio-feedback.png)
 
-The Pico's built-in USB connector is the upstream connection to the computer or
-PS5. The Type-A port added above is the downstream host connection for the USB
-hub.
+An imported LUT replaces profile 5. Standard / linear always stays available.
+The app’s brief force pulse tests the adapter-to-wheel path; GT7 supplies game
+forces when the Pico is connected to PS5. The app’s curve graph previews the
+mapping, not a physical torque measurement.
 
-![Adapter connection diagram](diagram.png)
+## Compatibility and help
 
-## Build the firmware
+The existing G27 console bridge, clutch, shifter, external Arduino brake, and
+force feedback have been tested with GT7 on PS5. The new PC setup workflow needs
+validation on the connected Pico before this preview becomes a stable release.
 
-The root-level `adapter.uf2` is the original upstream binary. It does not include
-the native G27 or external-brake changes. Build this fork and use
-`build/adapter.uf2` to get all features described here.
+USB pedal support requires a readable absolute HID axis in reports up to 64
+bytes. The app shows the axes it can interpret; it cannot add proprietary device
+drivers. Licensed controller compatibility still depends on the controller and
+console, even when its authentication interface is detected.
 
-Clone the fork and initialize its pinned dependencies:
+For connection problems, check the G27 power supply, use a USB data cable, and
+try another hub. The app’s **Setup guide** includes wiring, installation, and
+troubleshooting. Report problems in
+[Issues](https://github.com/bilgon32/ps5-wheel-adapter/issues).
 
-```sh
-git clone --recurse-submodules https://github.com/bilgon32/ps5-wheel-adapter.git
-cd ps5-wheel-adapter
-```
+## Starting point and credit
 
-For an existing clone:
+[Jan Fedor’s wheel-adapter](https://github.com/jfedor2/wheel-adapter) provided the
+original adapter design, USB bridge, and PS5 authentication that made this
+project possible. G27 Studio expands that starting point toward native G27
+support, configurable devices, measured force response, and accessible desktop
+setup. The original history and credit remain preserved.
 
-```sh
-git submodule update --init --recursive
-```
-
-Install CMake, Python 3, an Arm GNU toolchain, and a native C++ compiler for the
-Pico build tools. Ninja is recommended. If `arm-none-eabi-gcc` is not on `PATH`,
-set `PICO_TOOLCHAIN_PATH` to the Arm toolchain directory.
-
-The pinned Pico SDK contains older host-tool projects. With CMake 4, set
-`CMAKE_POLICY_VERSION_MINIMUM` before the first configure so the setting is
-inherited by those projects:
-
-```powershell
-$env:CMAKE_POLICY_VERSION_MINIMUM = '3.5' # Windows PowerShell
-```
-
-```sh
-export CMAKE_POLICY_VERSION_MINIMUM=3.5   # Linux or macOS
-```
-
-On Windows, open a Developer PowerShell so a Visual Studio C++ compiler is
-available, then run:
-
-```powershell
-$env:PICO_TOOLCHAIN_PATH = 'C:\path\to\arm-none-eabi'
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-```
-
-On Linux or macOS:
-
-```sh
-export PICO_TOOLCHAIN_PATH=/path/to/arm-none-eabi
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-```
-
-The resulting firmware is `build/adapter.uf2`.
-
-## Flash and connect the adapter
-
-1. Disconnect the Pico.
-2. Hold its **BOOTSEL** button while connecting its built-in USB port to your
-   computer.
-3. Open the `RPI-RP2` drive that appears.
-4. Copy `build/adapter.uf2` to that drive. The Pico automatically reboots.
-5. Disconnect the Pico from the computer.
-6. Connect the wheel and authentication controller to the downstream USB hub.
-   Connect the Arduino Micro too if using the external brake.
-7. Connect the hub to the Type-A host port added to the Pico.
-8. Power the wheel, then connect the Pico's built-in USB port to the PS5.
-
-The wheel should calibrate and center during startup. On a G27, the firmware
-then switches from the `046d:c294` compatibility identity to the native
-`046d:c29b` identity.
-
-The Pico LED turns off when the console begins authentication and turns on after
-the signed response is returned. It also briefly blinks a force-feedback profile
-number at startup or after a profile change, then returns to authentication
-status.
-
-In native G27 mode, the five RPM LED segments provide status where they are
-visible from the driving position:
-
-| G27 RPM LED pattern | Meaning |
-| --- | --- |
-| Bar fills from one to five segments | Native mode is ready, or authentication just completed |
-| One to five segments flash twice, then remain lit briefly | Selected force-feedback profile number |
-| Two outer segments blink slowly | Authentication controller is missing |
-| All five segments blink rapidly | The selected external brake is disconnected, has not reported, or timed out |
-
-Status patterns temporarily override GT7's decorative RPM indication. Game RPM
-commands are suppressed during a pattern, and normal game control resumes after
-the status clears.
-
-## G27 controls
-
-Native mode enables the clutch, H-shifter, and independent wheel buttons. The
-full mapping is in [docs/g27-protocol.md](docs/g27-protocol.md).
-
-Press the second and third red shifter buttons, Select + Start, within 75 ms of
-each other to send the PlayStation button. The firmware suppresses Select and
-Start until both are released, so releasing one before the other cannot open
-Share or Options. Pressing either button alone still works after the 75 ms chord
-detection delay.
-
-Hold the two **outer** red shifter buttons, L3 + R3, together for one second to
-cycle the force-feedback response. The firmware consumes the chord through
-release, blinks the Pico LED to identify the new profile, and remembers the
-selection across power cycles. Either button remains usable alone after the
-75 ms chord-detection delay.
-
-## Optional Arduino load-cell brake
-
-External braking is enabled automatically only for this measured Arduino Micro
-profile:
-
-| HID property | Required value |
-| --- | --- |
-| USB vendor and product ID | `2341:8037` |
-| Input report | Report ID `3`, 28 bytes including the ID |
-| Brake axis | Generic Desktop Rz, usage `0x35` |
-| Rz location | Bytes 16–17, zero-based and including the report ID |
-| Encoding | Signed 16-bit little-endian |
-| Default released endpoint | `-32767` |
-| Default fully pressed endpoint | `32767` |
-
-The adapter maps that input linearly onto the G29 brake range: `65535` released
-and `0` fully pressed. It applies no response curve, deadzone, or smoothing.
-
-To inspect the Arduino on Windows, connect it directly to the computer and run:
-
-```powershell
-.\tools\Inspect-Brake.ps1
-.\tools\Inspect-Brake.ps1 -Seconds 10
-```
-
-The second command performs a read-only live capture. Start released, press the
-pedal gradually to the intended maximum force, and release it. Compare the
-reported minimum and maximum with the configured endpoints. The captured device
-description is stored in
-[tools/arduino-micro-hid.json](tools/arduino-micro-hid.json).
-
-If the same HID layout uses different raw endpoints, edit these definitions in
-[`src/brake.h`](src/brake.h):
-
-```c
-#define BRAKE_RELEASED_RAW (-32767)
-#define BRAKE_PRESSED_RAW 32767
-```
-
-Swap the two values to invert the pedal direction. Rebuild and reflash after any
-change. A device with a different VID, PID, report ID, report size, byte offset,
-or encoding requires a corresponding source change; this is not a generic HID
-pedal mapper.
-
-When the Arduino is absent at boot, the wheel's original brake works normally.
-Once the Arduino connects, it owns the brake input until the adapter reboots.
-Disconnecting it or receiving no valid report for 500 ms safely releases the
-brake. Reconnect it to resume, or reboot without it to return to the wheel pedal.
-The Arduino firmware must send reports continuously, including while the pedal
-is stationary; sketches that report only changes need a different timeout
-policy.
-
-## Force feedback
-
-The adapter preserves command order, retries failed downstream transfers, and
-blocks console commands that could switch the physical wheel out of native
-mode. PS5 control transfers use a legacy packet layout, which is handled as a
-fallback after normal G29 report parsing.
-
-Periodic PS5 authentication packets share the downstream USB bus with the
-wheel. The scheduler sends one queued force-feedback command between
-authentication packets, preventing the signing exchange from starving the
-wheel and replaying a backlog of stale forces.
-
-For the G27, the adapter can reshape the signed level in Logitech steady-torque
-downloads and refreshes. Spring, damper, friction, range, RPM LED, mode, and
-unknown commands remain unchanged. The selectable profiles are:
-
-| Pico LED blinks | Profile | Behavior |
-| --- | --- | --- |
-| 1 | Linear | Passes constant force unchanged for comparison |
-| 2 | Minimum force 12% | Conservative deadzone compensation and the default on a fresh Pico |
-| 3 | Minimum force 18% | Stronger compensation for a G27 with a larger measured deadzone |
-| 4 | Progressive | Applies a smooth `x^0.65` low-force boost |
-| 5 | G27 measured LUT | Uses the inverse response measured from this project's G27 |
-
-Minimum-force profiles preserve exact zero and full-scale output. They compress
-the nonzero range instead of clipping strong forces. The setting is saved two
-seconds after a change in an append-only journal in the final 4 KiB flash
-sector. Reflashing a normal UF2 preserves it; fully erasing the Pico restores
-the 12% default.
-
-Native G27 mode provides 14-bit steering input. That is separate from motor
-resolution: constant force remains 8-bit and the protocol's high-resolution
-spring and damper parameters retain their original precision.
-
-The evidence, tradeoffs, protocol boundary, measured-LUT path, and validation
-plan are in
-[docs/ffb-deadzone-research.md](docs/ffb-deadzone-research.md).
-The original 101-point Assetto Corsa table is preserved as
-[profiles/g27-measured.lut](profiles/g27-measured.lut).
-
-## Dependencies
-
-The firmware uses pinned Git submodules:
-
-| Dependency | Revision used by this repository | Purpose |
-| --- | --- | --- |
-| [Raspberry Pi Pico SDK](https://github.com/raspberrypi/pico-sdk) | `1.5.1` / `6a7db34ff63345a7badec79ebea3aaef1712f374` | RP2040 runtime and build system |
-| [jfedor2/tinyusb](https://github.com/jfedor2/tinyusb) | `8ef98ab274065e29ba138cc6f2efa0dc68028db3` | USB device and host stack |
-| [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB) | `d00a10a8c425d0d40f81b87169102944b01f3bb3` | Downstream USB host on GPIO0/GPIO1 |
-
-The validated local toolchain was Arm GNU Toolchain `13.2.Rel1`. The project
-requires CMake 3.13 or newer, Python 3, and a host C++ compiler. Dependency
-licenses and notices remain in their respective submodule directories.
-
-## Run the host tests
-
-The host tests do not require a connected wheel or Pico. On Windows, use a
-Developer PowerShell with MSVC and Ninja:
-
-```sh
-cmake -S tests -B build-host-tests -G Ninja
-cmake --build build-host-tests --parallel
-ctest --test-dir build-host-tests --output-on-failure
-```
-
-The suite covers normal and inverted load-cell calibration, invalid and stale
-reports, disconnect recovery, native G27 axes and buttons, gears and neutral,
-packed G29 offsets, the PlayStation-button chord, force-feedback ordering and
-overflow, force-profile transforms and selection, G27 status patterns, failed
-sends, native-mode re-enumeration, and fair authentication arbitration.
+Upstream has no project-wide license; this fork does not relicense its code.
+See [credits and dependency notices](docs/credits.md).

@@ -1,0 +1,26 @@
+G27 STUDIO — START HERE
+
+1. Extract the entire ZIP. Open G27-Studio/G27-Studio.exe.
+2. Connect your G27, licensed PS4 specialty controller, and optional load-cell
+   pedal to the USB hub attached to your Pico. Power the G27 normally.
+3. For the first installation, hold the Pico's BOOTSEL button while connecting
+   its built-in USB port to your PC. In Install & backup, install the image.
+4. Click Connect Pico. Open setup mode if the adapter is in console mode.
+5. Select your controller and brake device in Devices & pedals. Press the pedal
+   to identify its axis; capture released and pressed positions if needed.
+6. Choose your force profile or import a .lut. Check the live dashboard.
+7. Save & switch to console. Move the Pico's built-in cable to PS5.
+
+The wheel, controller, and pedal stay on the Pico's downstream hub.
+Press the two middle red shifter buttons together for the PS button.
+Hold the two outer red shifter buttons for one second to change force profiles.
+
+Windows 10/11 x64. If the app cannot open its window, install Microsoft Edge
+WebView2 Runtime: https://developer.microsoft.com/microsoft-edge/webview2/
+Python and a compiler are not needed for the packaged application.
+
+Firmware and source: https://github.com/bilgon32/ps5-wheel-adapter
+Downloads: https://github.com/bilgon32/ps5-wheel-adapter/releases
+
+Jan Fedor's wheel-adapter provided the project's original starting point.
+See CREDITS.md for origin and dependency notices.

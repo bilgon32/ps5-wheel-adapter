@@ -1,0 +1,115 @@
+name: G27 Studio builds
+on:
+  push:
+    branches: [master, 'codex/**']
+    tags: ['studio-v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install Pico build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+      - name: Build Pico firmware
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pico-firmware
+          path: |
+            build/adapter.uf2
+            build/adapter.elf
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-2022
+    needs: firmware
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v8
+        with:
+          name: pico-firmware
+          path: build
+      - name: Build and test firmware logic
+        shell: pwsh
+        run: |
+          cmake -S tests -B build-host-tests -G "Visual Studio 17 2022" -A x64
+          cmake --build build-host-tests --config Debug --parallel
+          ctest --test-dir build-host-tests -C Debug --output-on-failure
+      - name: Install desktop dependencies
+        run: python -m pip install -r desktop/requirements.txt playwright==1.63.0
+      - name: Test desktop and firmware protocol together
+        working-directory: desktop
+        env:
+          G27_PROTOCOL_FIXTURE: ../build-host-tests/Debug/protocol_fixture.exe
+        run: python -m unittest discover -s tests -v
+      - name: Test UI and generate screenshots
+        run: python desktop/tests/check_ui.py --channel msedge
+      - name: Package desktop application
+        shell: pwsh
+        run: tools/build-desktop.ps1 -Python python
+      - name: Test packaged desktop startup
+        shell: pwsh
+        run: |
+          $process = Start-Process desktop/dist/G27-Studio/G27-Studio.exe -ArgumentList '--smoke-test', '--smoke-output', "$PWD/build/packaged-smoke.json" -WindowStyle Hidden -PassThru
+          if (!$process.WaitForExit(60000)) { $process.Kill(); throw 'Packaged app startup timed out.' }
+          $result = Get-Content build/packaged-smoke.json -Raw | ConvertFrom-Json
+          if (!$result.ok -or !$result.ui_ready -or !$result.data.firmware_available) { throw 'Packaged app startup check failed.' }
+      - name: Prepare downloadable archive
+        shell: pwsh
+        run: |
+          Copy-Item docs/QUICKSTART.txt desktop/dist/G27-Studio/READ-ME-FIRST.txt
+          Copy-Item docs/credits.md desktop/dist/G27-Studio/CREDITS.md
+          Copy-Item build/adapter.uf2 desktop/dist/G27-Studio/adapter.uf2
+          Compress-Archive -Path desktop/dist/G27-Studio -DestinationPath desktop/dist/G27-Studio-Windows-x64.zip
+          $files = @('desktop/dist/G27-Studio-Windows-x64.zip', 'build/adapter.uf2')
+          $lines = $files | ForEach-Object { $hash = Get-FileHash -LiteralPath $_ -Algorithm SHA256; "$($hash.Hash.ToLower())  $([IO.Path]::GetFileName($_))" }
+          $lines | Set-Content desktop/dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: G27-Studio-Windows-x64
+          path: |
+            desktop/dist/G27-Studio-Windows-x64.zip
+            desktop/dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/studio-v')
+    needs: [firmware, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: pico-firmware
+          path: firmware
+      - uses: actions/download-artifact@v8
+        with:
+          name: G27-Studio-Windows-x64
+          path: desktop
+      - name: Create preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" --verify-tag --prerelease --title "G27 Studio ${RELEASE_TAG#studio-}" --notes "Windows desktop app with bundled Pico firmware. Download the ZIP, extract it, and open G27-Studio.exe. G27 only; handbrake is outside this release. This preview adds PC setup mode and configurable pedals; validate your setup before regular console use." firmware/adapter.uf2 desktop/G27-Studio-Windows-x64.zip desktop/SHA256SUMS.txt
