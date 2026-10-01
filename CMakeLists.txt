@@ -23,6 +23,13 @@ add_executable(adapter
     src/ffb.c
     src/profile_store.c
     src/descriptors.c
+    src/settings.c
+    src/settings_store.c
+    src/hid_axes.c
+    src/device_registry.c
+    src/pc_mode.c
+    src/pc_protocol.c
+    src/auth_bridge.c
 )
 target_compile_features(adapter PRIVATE c_std_11)
 target_compile_definitions(adapter PRIVATE PICO_FLASH_ASSUME_CORE1_SAFE=1)
@@ -31,9 +38,15 @@ target_link_libraries(adapter
     pico_stdlib
     pico_flash
     hardware_exception
+    hardware_watchdog
     tinyusb_host
     tinyusb_device
     tinyusb_board
     tinyusb_pico_pio_usb
 )
+# Configuration and the profile journal occupy the last three flash sectors.
+# Linker overflow is a build failure, rather than a runtime loss of settings.
+target_compile_definitions(adapter PRIVATE PICO_FLASH_SIZE_BYTES=2097152)
+target_link_options(adapter PRIVATE "LINKER:--defsym=__flash_config_start=0x101fd000"
+    "LINKER:-T,${CMAKE_CURRENT_LIST_DIR}/src/settings_guard.ld")
 pico_add_extra_outputs(adapter)

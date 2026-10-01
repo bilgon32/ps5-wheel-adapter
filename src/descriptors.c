@@ -3,6 +3,8 @@
 #include "tusb.h"
 
 #include "reports.h"
+#include "pc_mode.h"
+#include "pc_protocol.h"
 
 // G29
 #define USB_VID 0x046D
@@ -127,15 +129,40 @@ char const* string_desc_arr[] = {
     "G29 Driving Force Racing Wheel",  // 2: Product
 };
 
+/* Setup is a separate personality. Console descriptors above remain unchanged. */
+static tusb_desc_device_t const pc_device = {
+    .bLength = sizeof(tusb_desc_device_t), .bDescriptorType = TUSB_DESC_DEVICE,
+    .bcdUSB = 0x0200, .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
+    .idVendor = PC_USB_VID, .idProduct = PC_USB_PID, .bcdDevice = 0x0100,
+    .iManufacturer = 1, .iProduct = 2, .bNumConfigurations = 1
+};
+static uint8_t const pc_report[] = {
+    0x06, 0x00, 0xff, 0x09, 0x01, 0xa1, 0x01,
+    0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08,
+    0x85, 0x01, 0x09, 0x01, 0x95, 0x3f, 0xb1, 0x02,
+    0x85, 0x02, 0x09, 0x02, 0x95, 0x3f, 0x81, 0x02, 0xc0
+};
+static uint8_t const pc_configuration[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_SELF_POWERED, 200),
+    TUD_HID_INOUT_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, sizeof(pc_report), EPNUM_HID_OUT,
+        EPNUM_HID_IN, CFG_TUD_HID_EP_BUFSIZE, 10)
+};
+static char const* pc_strings[] = { (const char[]){0x09, 0x04}, "G27 Studio", "G27 Studio Setup" };
+
 uint8_t const* tud_descriptor_device_cb(void) {
+    if (pc_setup_mode) return (uint8_t const*)&pc_device;
     return (uint8_t const*) &desc_device;
 }
 
 uint8_t const* tud_hid_descriptor_report_cb(uint8_t itf) {
+    (void)itf;
+    if (pc_setup_mode) return pc_report;
     return desc_hid_report;
 }
 
 uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
+    (void)index;
+    if (pc_setup_mode) return pc_configuration;
     return desc_configuration;
 }
 
@@ -144,6 +171,7 @@ static uint16_t _desc_str[32];
 // Invoked when received GET STRING DESCRIPTOR request
 // Application return pointer to descriptor, whose contents must exist long enough for transfer to complete
 uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
+    (void)langid;
     uint8_t chr_count;
 
     if (index == 0) {
@@ -156,7 +184,7 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
         if (!(index < sizeof(string_desc_arr) / sizeof(string_desc_arr[0])))
             return NULL;
 
-        const char* str = string_desc_arr[index];
+        const char* str = pc_setup_mode ? pc_strings[index] : string_desc_arr[index];
 
         // Cap at max char
         chr_count = strlen(str);

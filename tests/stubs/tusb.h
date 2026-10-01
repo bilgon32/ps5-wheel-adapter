@@ -18,4 +18,6 @@ void tuh_vid_pid_get(uint8_t device, uint16_t* vid, uint16_t* pid);
 void tusb_init(void);
 void tuh_task(void);
 void tud_task(void);
+void tuh_hid_get_report_complete_cb(uint8_t device, uint8_t instance, uint8_t id, uint8_t type, uint16_t length);
+void tuh_hid_set_report_complete_cb(uint8_t device, uint8_t instance, uint8_t id, uint8_t type, uint16_t length);
 #endif

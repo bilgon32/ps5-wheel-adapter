@@ -42,6 +42,9 @@ void tuh_vid_pid_get(uint8_t device, uint16_t* vid, uint16_t* pid) {
 }
 
 int main(void) {
+    settings_defaults(&settings);
+    settings.external_brake = true;
+    settings.auth_vid = 0x1532; settings.auth_pid = 1; settings.auth_instance = 0;
     report_init();
     tuh_hid_mount_cb(1, 0, NULL, 0);
     df_report_t wheel = { 0 };

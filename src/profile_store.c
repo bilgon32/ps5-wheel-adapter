@@ -6,7 +6,7 @@
 #include "ffb.h"
 
 #define PROFILE_MAGIC 0x50424646u /* "FFBP" in little endian */
-#define PROFILE_VERSION 1u
+#define PROFILE_VERSION 2u
 #define PROFILE_SAVE_DELAY_MS 2000u
 
 typedef struct {
@@ -16,8 +16,9 @@ typedef struct {
     uint8_t profile;
     uint8_t profile_inverse;
     uint8_t reserved;
+    uint32_t scope;
     uint32_t checksum;
-    uint8_t padding[240];
+    uint8_t padding[236];
 } profile_record_t;
 
 _Static_assert(sizeof(profile_record_t) == 256, "profile record must fill one flash page");
@@ -62,7 +63,12 @@ static void __not_in_flash_func(profile_flash_write)(void* argument) {
 #endif
 
 uint8_t profile_store_init(profile_store_t* store, uint8_t fallback_profile) {
+    return profile_store_init_scoped(store, fallback_profile, 0);
+}
+
+uint8_t profile_store_init_scoped(profile_store_t* store, uint8_t fallback_profile, uint32_t scope) {
     memset(store, 0, sizeof(*store));
+    store->scope = scope;
     store->profile = ffb_profile_valid(fallback_profile) ? fallback_profile : FFB_PROFILE_MINIMUM_12;
 #ifndef _MSC_VER
     // Protect the journal if a future firmware ever grows into the last sector.
@@ -81,7 +87,7 @@ uint8_t profile_store_init(profile_store_t* store, uint8_t fallback_profile) {
             (!found || (int32_t) (records[slot].sequence - store->sequence) > 0)) {
             found = true;
             store->sequence = records[slot].sequence;
-            store->profile = records[slot].profile;
+            if (records[slot].scope == scope) store->profile = records[slot].profile;
         }
     }
 #else
@@ -110,6 +116,7 @@ void profile_store_task(profile_store_t* store, uint32_t now) {
     operation.record.profile = store->profile;
     operation.record.profile_inverse = (uint8_t) ~store->profile;
     operation.record.reserved = 0;
+    operation.record.scope = store->scope;
     operation.record.checksum = profile_checksum(&operation.record);
 
     if (flash_safe_execute(profile_flash_write, &operation, 100u) != PICO_OK) return;

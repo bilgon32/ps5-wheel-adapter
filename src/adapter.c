@@ -19,21 +19,23 @@
 #include "g27_leds.h"
 #include "ffb.h"
 #include "profile_store.h"
+#include "settings.h"
+#include "device_registry.h"
+#include "pc_mode.h"
+#include "pc_protocol.h"
+#include "auth_bridge.h"
 
-uint8_t nonce_id;
-uint8_t nonce[280];
-uint8_t nonce_part = 0;
-uint8_t signature[1064];
-uint8_t signature_part = 0;
-uint8_t signature_ready = 0;
-uint8_t nonce_ready = 0;
-
-uint8_t expected_part = 0;
+adapter_settings_t settings;
+device_registry_t devices;
+pc_protocol_t pc_protocol;
+static bool pc_force_active;
+static uint32_t pc_force_until;
+static bool adapter_apply_settings(bool save);
+static bool adapter_pc_force(int8_t level);
+static uint8_t adapter_pc_wheel_status(void);
 
 uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
-uint8_t auth_device = 0;
-uint8_t auth_instance = 0;
 uint8_t brake_device = 0;
 uint8_t brake_instance = 0;
 bool brake_receive_pending = false;
@@ -61,20 +63,7 @@ uint8_t profile_led_pulses;
 uint32_t profile_led_deadline;
 
 #define AUTH_FFB_YIELD_MAX_MS 25u
-bool busy = false;
-bool auth_yield_for_ffb;
-uint32_t auth_yield_started_at;
 uint32_t auth_ffb_yields;
-
-enum {
-    IDLE = 0,
-    SENDING_RESET = 1,
-    SENDING_NONCE = 2,
-    WAITING_FOR_SIG = 3,
-    RECEIVING_SIG = 4,
-};
-
-uint8_t state = IDLE;
 
 typedef enum {
     WHEEL_ABSENT, WHEEL_PREPARE_NATIVE, WHEEL_REVERT_ON_RESET, WHEEL_SWITCH_NATIVE,
@@ -131,8 +120,6 @@ static void adapter_led_task(uint32_t now) {
     }
 }
 
-uint8_t get_buffer[64];
-uint8_t set_buffer[64];
 
 g29_report_t report;
 g29_report_t prev_report;
@@ -147,7 +134,6 @@ const uint8_t output_0x03[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-const uint8_t output_0xf3[] = { 0x0, 0x38, 0x38, 0, 0, 0, 0 };
 
 void wheel_controls_reset() {
     memset(&report, 0, sizeof(report));
@@ -320,16 +306,14 @@ static void profile_shortcut_update(uint32_t now) {
 }
 
 void hid_task() {
-    if (!tud_hid_ready()) {
-        return;
-    }
-
     uint32_t now = adapter_millis();
     // On a G27, Select and Start are the second and third red shifter buttons.
     ps_shortcut_update(now);
     // Hold the two outer red shifter buttons to cycle force-feedback profiles.
     profile_shortcut_update(now);
     report.brake = external_brake_value(&external_brake, wheel_brake, now);
+
+    if (pc_setup_mode || !tud_hid_ready()) return;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
         if (tud_hid_report(1, &report, sizeof(report))) {
@@ -453,9 +437,7 @@ void wheel_init_task() {
         wheel_receive_pending = tuh_hid_receive_report(wheel_device, wheel_instance);
         if (!wheel_receive_pending) wheel_receive_retry_at = now + 10u;
     }
-    bool brake_fault = external_brake.selected &&
-        (!external_brake.connected || !external_brake.has_sample ||
-         (uint32_t) (now - external_brake.updated_ms) >= BRAKE_TIMEOUT_MS);
+    bool brake_fault = external_brake_fault(&external_brake, now);
     g27_leds_set_conditions(&g27_leds, auth_device != 0, brake_fault, now);
 
     // Status indications own the decorative RPM LEDs while active. Discard
@@ -546,52 +528,84 @@ void tuh_hid_report_sent_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* d
     wheel_command_succeeded();
 }
 
-void auth_task() {
-    uint32_t now = adapter_millis();
-    if (auth_yield_for_ffb) {
-        if (!wheel_device || wheel_phase != WHEEL_READY || !ffb_front(&ffb_queue) ||
-            (uint32_t) (now - auth_yield_started_at) >= AUTH_FFB_YIELD_MAX_MS) {
-            auth_yield_for_ffb = false;
-        } else {
-            return;
-        }
-    }
-    if (!busy && !wheel_tx_pending && auth_device) {
-        switch (state) {
-            case IDLE:
-                break;
-            case SENDING_RESET:
-                busy = tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
-                break;
-            case SENDING_NONCE:
-                set_buffer[0] = 0xF0;
-                set_buffer[1] = nonce_id;
-                set_buffer[2] = nonce_part;
-                set_buffer[3] = 0;
-                memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
-                printf(".");
-                busy = tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
-                break;
-            case WAITING_FOR_SIG:
-                busy = tuh_hid_get_report(auth_device, auth_instance, 0xF2, HID_REPORT_TYPE_FEATURE, get_buffer, 15 + 1);
-                break;
-            case RECEIVING_SIG:
-                busy = tuh_hid_get_report(auth_device, auth_instance, 0xF1, HID_REPORT_TYPE_FEATURE, get_buffer, 63 + 1);
-                break;
-        }
-    }
+uint32_t adapter_auth_millis(void) { return adapter_millis(); }
+bool adapter_auth_waiting_for_ffb(void) {
+    return wheel_device && wheel_phase == WHEEL_READY && ffb_front(&ffb_queue);
+}
+bool adapter_wheel_transfer_pending(void) { return wheel_tx_pending; }
+void adapter_auth_completed(void) {
+    adapter_led_set_auth(true);
+    g27_leds_show_ready(&g27_leds, adapter_millis());
 }
 
-static void auth_transfer_finished(void) {
-    busy = false;
-    auth_yield_for_ffb = true;
-    auth_yield_started_at = adapter_millis();
+static bool adapter_apply_settings(bool save) {
+    if (save && !settings_save(&settings)) return false;
+    brake_device = 0; brake_instance = 0; brake_receive_pending = false;
+    external_brake_configure(&external_brake, &settings);
+    auth_device = 0; auth_instance = 0; busy = false;
+    state = IDLE; nonce_ready = false; signature_ready = false;
+    auth_yield_for_ffb = false;
+    ffb_clear(&ffb_queue);
+    ffb_set_custom_lut(&ffb_queue, settings.custom_lut ? settings.lut : NULL);
+    ffb_set_profile(&ffb_queue, (ffb_profile_t)settings.default_profile);
+    uint8_t bytes[SETTINGS_SIZE]; settings_encode(&settings, 0, bytes);
+    profile_store_init_scoped(&profile_store, settings.default_profile,
+        settings_checksum(bytes + 16, SETTINGS_SIZE - 16));
+    for (unsigned i = 0; i < ADAPTER_DEVICE_MAX; i++) {
+        adapter_device_t* d = &devices.items[i];
+        if (!brake_device && device_is_brake(d, &settings)) {
+            brake_device = d->address; brake_instance = d->instance;
+            external_brake_connect(&external_brake);
+            if (d->has_report) external_brake_receive(&external_brake, d->report, d->report_length, d->updated_ms);
+        } else if (!auth_device && device_is_auth(d, &settings)) {
+            auth_device = d->address; auth_instance = d->instance;
+        }
+    }
+    return true;
+}
+
+static bool adapter_pc_force(int8_t level) {
+    if (!pc_setup_mode || !wheel_device || wheel_phase != WHEEL_READY || ffb_queue.count > 8) return false;
+    uint8_t force[] = {0x11, 0, (uint8_t)((level < 0 ? 127 : 128) + level), 128, 128, 128, 0};
+    if (!level) force[0] = 0xf3;
+    if (!ffb_enqueue_report(&ffb_queue, 5, force, sizeof(force))) return false;
+    /* A bench pulse stays below 25%, even with an aggressive imported LUT. */
+    unsigned tail = (ffb_queue.head + ffb_queue.count - 1u) % FFB_QUEUE_CAPACITY;
+    uint8_t* shaped = &ffb_queue.commands[tail][2];
+    if (*shaped > 159) *shaped = 159;
+    if (*shaped < 96) *shaped = 96;
+    pc_force_active = level != 0;
+    pc_force_until = adapter_millis() + 300u;
+    return true;
+}
+
+static uint8_t adapter_pc_wheel_status(void) {
+    if (!wheel_device) return 0;
+    if (wheel_phase != WHEEL_READY) return 1;
+    return wheel_pid == G27_PID ? 2 : 3;
 }
 
 int main() {
     board_init();
+    bool configured = settings_load(&settings);
+    pc_mode_init(configured);
     report_init();
-    ffb_set_profile(&ffb_queue, (ffb_profile_t) profile_store_init(&profile_store, FFB_PROFILE_MINIMUM_12));
+    external_brake_configure(&external_brake, &settings);
+    ffb_set_custom_lut(&ffb_queue, settings.custom_lut ? settings.lut : NULL);
+    uint8_t settings_bytes[SETTINGS_SIZE]; settings_encode(&settings, 0, settings_bytes);
+    ffb_set_profile(&ffb_queue, (ffb_profile_t) profile_store_init_scoped(&profile_store,
+        settings.default_profile, settings_checksum(settings_bytes + 16, SETTINGS_SIZE - 16)));
+    pc_protocol.settings = &settings; pc_protocol.devices = &devices;
+    pc_protocol.input = &report; pc_protocol.ffb = &ffb_queue;
+    pc_protocol.wheel_address = &wheel_device; pc_protocol.apply = adapter_apply_settings;
+    pc_protocol.force = adapter_pc_force;
+    pc_protocol.wheel_status = adapter_pc_wheel_status;
+#ifndef _MSC_VER
+    pc_protocol.flash_bytes = PICO_FLASH_SIZE_BYTES;
+#else
+    pc_protocol.flash_bytes = 2097152u;
+#endif
+    pc_protocol_init(&pc_protocol);
 #ifndef _MSC_VER
     // Preserve the two-PIO layout used by the repository's proven 2023 host
     // stack. New Pico-PIO-USB defaults both engines to PIO0, which prevents the
@@ -616,68 +630,33 @@ int main() {
         hid_task();
         auth_task();
         wheel_init_task();
+        if (pc_setup_mode) {
+            for (unsigned i = 0; i < ADAPTER_DEVICE_MAX; i++) {
+                adapter_device_t* d = &devices.items[i];
+                if (d->connected && d->address != wheel_device &&
+                    !(d->address == brake_device && d->instance == brake_instance) && !d->receive_pending)
+                    d->receive_pending = tuh_hid_receive_report(d->address, d->instance);
+            }
+            if (pc_force_active && (int32_t)(adapter_millis() - pc_force_until) >= 0)
+                adapter_pc_force(0);
+        }
         profile_store_task(&profile_store, adapter_millis());
         adapter_led_task(adapter_millis());
+        pc_mode_task();
     }
 
     return 0;
-}
-
-void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t report_id, uint8_t report_type, uint16_t len) {
-    (void) report_type;
-    if (dev_addr == auth_device && idx == auth_instance) {
-        auth_transfer_finished();
-        switch (report_id) {
-            case 0xF3:
-                if (state != SENDING_RESET || len < 8u) break;
-                printf("Sending nonce to auth controller");
-                state = SENDING_NONCE;
-                break;
-            case 0xF2:
-                if (state != WAITING_FOR_SIG || len < 16u) break;
-                // printf(".");
-                if (get_buffer[2] == 0) {
-                    signature_part = 0;
-                    state = RECEIVING_SIG;
-                    printf("\n");
-                    printf("Receiving signature from auth controller");
-                }
-                break;
-            case 0xF1:
-                if (state != RECEIVING_SIG || len < 64u) break;
-                memcpy(signature + (signature_part * 56), get_buffer + 4, 56);
-                signature_part++;
-                printf(".");
-                if (signature_part == 19) {
-                    state = IDLE;
-                    expected_part = 0;
-                    signature_ready = true;
-                    signature_part = 0;
-                    printf("\n");
-                }
-                break;
-        }
-    }
-}
-
-void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t report_id, uint8_t report_type, uint16_t len) {
-    (void) report_type;
-    if (dev_addr == auth_device && idx == auth_instance && report_id == 0xF0) {
-        auth_transfer_finished();
-        if (state != SENDING_NONCE || len < 64u) return;
-        nonce_part++;
-        if (nonce_part == 5u) {
-            printf("\n");
-            printf("Waiting for auth controller to sign...\n");
-            state = WAITING_FOR_SIG;
-        }
-    }
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
     (void) itf;
     (void) report_type;
     if (!buffer) return 0;
+    if (pc_setup_mode) {
+        if (report_id != 1 || report_type != HID_REPORT_TYPE_FEATURE) return 0;
+        uint16_t length = reqlen < PC_PACKET_SIZE ? reqlen : PC_PACKET_SIZE;
+        memcpy(buffer, pc_protocol.reply, length); return length;
+    }
     switch (report_id) {
         case 0x03: {
             uint16_t length = reqlen < sizeof(output_0x03) ? reqlen : sizeof(output_0x03);
@@ -685,41 +664,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             adapter_led_set_auth(false);
             return length;
         }
-        case 0xF3: {
-            uint16_t length = reqlen < sizeof(output_0xf3) ? reqlen : sizeof(output_0xf3);
-            memcpy(buffer, output_0xf3, length);
-            signature_ready = false;
-            return length;
-        }
-        case 0xF1: {  // GET_SIGNATURE_NONCE
-            uint16_t length = reqlen < 63u ? reqlen : 63u;
-            memset(buffer, 0, length);
-            if (length < 59u) return length;
-            buffer[0] = nonce_id;
-            buffer[1] = signature_part;
-            if (signature_part == 0) {
-                printf("Sending signature to PS5");
-            }
-            printf(".");
-            memcpy(&buffer[3], &signature[signature_part * 56], 56);
-            signature_part++;
-            if (signature_part == 19) {
-                signature_part = 0;
-                printf("\n");
-                adapter_led_set_auth(true);
-                g27_leds_show_ready(&g27_leds, adapter_millis());
-            }
-            return length;
-        }
-        case 0xF2: {  // GET_SIGNING_STATE
-            uint16_t length = reqlen < 15u ? reqlen : 15u;
-            if (length < 2u) return length;
-            printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
-            buffer[0] = nonce_id;
-            buffer[1] = signature_ready ? 0 : 16;
-            if (length > 2u) memset(&buffer[2], 0, length - 2u);
-            return length;
-        }
+        default: return auth_bridge_get_report(report_id, buffer, reqlen);
     }
     return reqlen;
 }
@@ -727,31 +672,18 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
     (void) itf;
     (void) report_type;
+    if (pc_setup_mode) {
+        if (report_id == 1 && report_type == HID_REPORT_TYPE_FEATURE)
+            pc_protocol_request(&pc_protocol, buffer, bufsize);
+        return;
+    }
+    static const uint8_t setup_request[7] = {'W', 'A', 'C', 'F', 'G', 1, 0};
+    if (report_id == 0xf3 && report_type == HID_REPORT_TYPE_FEATURE && bufsize >= sizeof(setup_request) &&
+        buffer && !memcmp(buffer, setup_request, sizeof(setup_request))) {
+        pc_mode_request(PC_REBOOT_SETUP); return;
+    }
     if (report_id == 0xF0) {  // SET_AUTH_PAYLOAD
-        if (!buffer || bufsize < 59u) return;
-        uint8_t part = expected_part;
-        if (bufsize == 63) {
-            nonce_id = buffer[0];
-            part = buffer[1];
-        }
-        if (part == 0) {
-            nonce_ready = false;
-            signature_ready = false;
-            printf("Getting nonce from PS5");
-        }
-        printf(".");
-        if (part > 4) {
-            return;
-        }
-        expected_part = part + 1;
-        memcpy(&nonce[part * 56], &buffer[3], 56);
-        if (part == 4) {
-            nonce_ready = 1;
-            printf("\n");
-            printf("Sending reset to auth controller...\n");
-            state = SENDING_RESET;
-            nonce_part = 0;
-        }
+        auth_bridge_set_report(buffer, bufsize);
     } else {
         // The original adapter accepted every non-auth SET_REPORT here. Keep
         // that behavior: the PS5 may label G29 report 5 differently from a
@@ -766,6 +698,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     uint16_t vid;
     uint16_t pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
+    adapter_device_t* device = devices_mount(&devices, dev_addr, instance, vid, pid, desc_report, desc_len);
 
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
 
@@ -792,7 +725,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
         // Unsupported wheels time out and continue in compatibility mode.
         wheel_phase = pid == G27_PID ? WHEEL_STOP_FORCES : WHEEL_PREPARE_NATIVE;
         wheel_controls_reset();
-    } else if ((vid == BRAKE_USB_VID) && (pid == BRAKE_USB_PID)) {
+    } else if (device_is_brake(device, &settings)) {
         // Reserve every HID interface of this device so it can never replace auth.
         // The measured Micro has one HID interface (USB interface 2).
         if (!brake_device) {
@@ -802,13 +735,13 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
             external_brake_connect(&external_brake);
             printf("External Arduino brake connected\n");
         }
-    } else {  // retain the original auth-controller convention for other devices
-        auth_device = dev_addr;
-        auth_instance = instance;
+    } else if (!auth_device && device_is_auth(device, &settings)) {
+        auth_device = dev_addr; auth_instance = instance;
     }
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
+    devices_unmount(&devices, dev_addr, instance);
     printf("tuh_hid_umount_cb\n");
     if ((dev_addr == wheel_device) && (instance == wheel_instance)) {
         wheel_device = 0;
@@ -845,6 +778,7 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
+    devices_report(&devices, dev_addr, instance, report_, len, adapter_millis());
     if ((dev_addr == brake_device) && (instance == brake_instance)) {
         brake_receive_pending = false;
         external_brake_receive(&external_brake, report_, len, adapter_millis());

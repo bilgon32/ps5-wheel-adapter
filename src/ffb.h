@@ -22,6 +22,7 @@ typedef struct {
     uint32_t received, sent, transformed, suppressed_leds, overflows, blocked_mode_changes, invalid;
     ffb_profile_t profile;
     bool profiles_enabled;
+    const uint8_t* custom_lut;
 } ffb_queue_t;
 
 // Report 5 over control excludes its ID; interrupt OUT includes the ID. Unknown
@@ -35,6 +36,7 @@ bool ffb_command_is_rpm_led(const uint8_t* command);
 bool ffb_profile_valid(uint8_t profile);
 void ffb_set_profile(ffb_queue_t* queue, ffb_profile_t profile);
 void ffb_enable_profiles(ffb_queue_t* queue, bool enabled);
+bool ffb_set_custom_lut(ffb_queue_t* queue, const uint8_t* lut);
 ffb_profile_t ffb_next_profile(ffb_profile_t profile);
 const char* ffb_profile_name(ffb_profile_t profile);
 #endif

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "settings.h"
 
 // Profile measured from the user's Arduino Micro. See tools/arduino-micro-hid.json.
 #define BRAKE_USB_VID 0x2341
@@ -30,10 +31,14 @@ typedef struct {
     bool has_sample;
     uint16_t value;
     uint32_t updated_ms;
+    const adapter_settings_t* settings;
+    int32_t raw;
 } external_brake_t;
 
 void external_brake_connect(external_brake_t* brake);
 void external_brake_disconnect(external_brake_t* brake);
+void external_brake_configure(external_brake_t* brake, const adapter_settings_t* settings);
+bool external_brake_fault(const external_brake_t* brake, uint32_t now_ms);
 bool external_brake_receive(external_brake_t* brake, const uint8_t* data, size_t length, uint32_t now_ms);
 uint16_t external_brake_value(const external_brake_t* brake, uint16_t wheel_brake, uint32_t now_ms);
 

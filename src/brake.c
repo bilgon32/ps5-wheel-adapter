@@ -1,4 +1,5 @@
 #include "brake.h"
+#include "hid_axes.h"
 
 _Static_assert(BRAKE_RELEASED_RAW >= -32768 && BRAKE_RELEASED_RAW <= 32767, "Release endpoint must fit signed Rz");
 _Static_assert(BRAKE_PRESSED_RAW >= -32768 && BRAKE_PRESSED_RAW <= 32767, "Pressed endpoint must fit signed Rz");
@@ -19,12 +20,25 @@ void external_brake_disconnect(external_brake_t* brake) {
 }
 
 bool external_brake_receive(external_brake_t* brake, const uint8_t* data, size_t length, uint32_t now_ms) {
+    if (brake->settings) {
+        const adapter_settings_t* s = brake->settings;
+        hid_axis_t axis = {0};
+        axis.report_id = s->brake_report_id; axis.bit_offset = s->brake_bit_offset;
+        axis.width = s->brake_width; axis.is_signed = s->brake_signed;
+        int32_t raw;
+        if (!brake->connected || !hid_axis_read(&axis, data, length, &raw)) return false;
+        brake->raw = raw;
+        brake->value = hid_axis_pedal(raw, s->brake_released, s->brake_pressed);
+        brake->updated_ms = now_ms; brake->has_sample = true;
+        return true;
+    }
     if (!brake->connected || !data || length != BRAKE_REPORT_SIZE || data[0] != BRAKE_REPORT_ID) {
         return false;
     }
 
     uint32_t bits = (uint32_t) data[BRAKE_RZ_OFFSET] | ((uint32_t) data[BRAKE_RZ_OFFSET + 1] << 8);
     int32_t raw = bits & 0x8000u ? (int32_t) bits - 65536 : (int32_t) bits;
+    brake->raw = raw;
     int64_t position = (int64_t) raw - BRAKE_RELEASED_RAW;
     int64_t span = (int64_t) BRAKE_PRESSED_RAW - BRAKE_RELEASED_RAW;
     if (span < 0) {
@@ -42,8 +56,20 @@ bool external_brake_receive(external_brake_t* brake, const uint8_t* data, size_t
 
 uint16_t external_brake_value(const external_brake_t* brake, uint16_t wheel_brake, uint32_t now_ms) {
     if (!brake->selected) return wheel_brake;
-    if (!brake->connected || !brake->has_sample || (uint32_t) (now_ms - brake->updated_ms) >= BRAKE_TIMEOUT_MS) {
+    if (external_brake_fault(brake, now_ms)) {
         return BRAKE_G29_RELEASED;
     }
     return brake->value;
+}
+
+void external_brake_configure(external_brake_t* brake, const adapter_settings_t* settings) {
+    brake->settings = settings;
+    brake->selected = settings && settings->external_brake;
+    brake->connected = false; brake->has_sample = false;
+    brake->value = BRAKE_G29_RELEASED;
+}
+bool external_brake_fault(const external_brake_t* brake, uint32_t now_ms) {
+    uint32_t timeout = brake->settings ? brake->settings->brake_timeout_ms : BRAKE_TIMEOUT_MS;
+    return brake->selected && (!brake->connected || !brake->has_sample ||
+        (timeout && (uint32_t)(now_ms - brake->updated_ms) >= timeout));
 }
