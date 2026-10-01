@@ -1,2 +1,10 @@
 /build*/
 /.tools/
+__pycache__/
+*.pyc
+/desktop/dist/
+/desktop/build/
+/desktop/firmware/
+/desktop/licenses/
+/.venv/
+*.spec
