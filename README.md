@@ -103,9 +103,7 @@ hub.
 
 ## Build the firmware
 
-The root-level `adapter.uf2` is the original upstream binary. It does not include
-the native G27 or external-brake changes. Build this fork and use
-`build/adapter.uf2` to get all features described here.
+Build this fork and use `build/adapter.uf2` to get all features described here.
 
 Clone the fork and initialize its pinned dependencies:
 
