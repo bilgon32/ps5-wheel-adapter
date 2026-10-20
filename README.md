@@ -7,6 +7,22 @@ through an Arduino Micro.
 
 The project runs entirely over USB. It does not use Remote Play.
 
+## Download the firmware
+
+Download **[adapter.uf2](https://github.com/bilgon32/ps5-wheel-adapter/releases/latest/download/adapter.uf2)**
+from the [latest release](https://github.com/bilgon32/ps5-wheel-adapter/releases/latest).
+The firmware is ready to flash onto a Raspberry Pi Pico (RP2040) and includes
+all the features described below. Compiling from source is optional.
+
+The [2026.10.20 release](https://github.com/bilgon32/ps5-wheel-adapter/releases/tag/firmware-v2026.10.20)
+contains the build confirmed working on hardware by the repository owner.
+Release notes include build details, and
+[SHA256SUMS](https://github.com/bilgon32/ps5-wheel-adapter/releases/latest/download/SHA256SUMS)
+lets you verify the download.
+
+Follow the hardware assembly instructions below, then
+[flash and connect the adapter](#flash-and-connect-the-adapter).
+
 ## Origin, credit, and license
 
 This repository is a personal fork of
@@ -101,65 +117,13 @@ hub.
 
 ![Adapter connection diagram](diagram.png)
 
-## Build the firmware
-
-Build this fork and use `build/adapter.uf2` to get all features described here.
-
-Clone the fork and initialize its pinned dependencies:
-
-```sh
-git clone --recurse-submodules https://github.com/bilgon32/ps5-wheel-adapter.git
-cd ps5-wheel-adapter
-```
-
-For an existing clone:
-
-```sh
-git submodule update --init --recursive
-```
-
-Install CMake, Python 3, an Arm GNU toolchain, and a native C++ compiler for the
-Pico build tools. Ninja is recommended. If `arm-none-eabi-gcc` is not on `PATH`,
-set `PICO_TOOLCHAIN_PATH` to the Arm toolchain directory.
-
-The pinned Pico SDK contains older host-tool projects. With CMake 4, set
-`CMAKE_POLICY_VERSION_MINIMUM` before the first configure so the setting is
-inherited by those projects:
-
-```powershell
-$env:CMAKE_POLICY_VERSION_MINIMUM = '3.5' # Windows PowerShell
-```
-
-```sh
-export CMAKE_POLICY_VERSION_MINIMUM=3.5   # Linux or macOS
-```
-
-On Windows, open a Developer PowerShell so a Visual Studio C++ compiler is
-available, then run:
-
-```powershell
-$env:PICO_TOOLCHAIN_PATH = 'C:\path\to\arm-none-eabi'
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-```
-
-On Linux or macOS:
-
-```sh
-export PICO_TOOLCHAIN_PATH=/path/to/arm-none-eabi
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-```
-
-The resulting firmware is `build/adapter.uf2`.
-
 ## Flash and connect the adapter
 
 1. Disconnect the Pico.
 2. Hold its **BOOTSEL** button while connecting its built-in USB port to your
    computer.
 3. Open the `RPI-RP2` drive that appears.
-4. Copy `build/adapter.uf2` to that drive. The Pico automatically reboots.
+4. Copy the downloaded `adapter.uf2` to that drive. The Pico automatically reboots.
 5. Disconnect the Pico from the computer.
 6. Connect the wheel and authentication controller to the downstream USB hub.
    Connect the Arduino Micro too if using the external brake.
@@ -245,7 +209,8 @@ If the same HID layout uses different raw endpoints, edit these definitions in
 #define BRAKE_PRESSED_RAW 32767
 ```
 
-Swap the two values to invert the pedal direction. Rebuild and reflash after any
+Swap the two values to invert the pedal direction. Follow the
+[developer build guide](docs/building.md) to rebuild and reflash after any
 change. A device with a different VID, PID, report ID, report size, byte offset,
 or encoding requires a corresponding source change; this is not a generic HID
 pedal mapper.
@@ -298,33 +263,7 @@ plan are in
 The original 101-point Assetto Corsa table is preserved as
 [profiles/g27-measured.lut](profiles/g27-measured.lut).
 
-## Dependencies
+## Development
 
-The firmware uses pinned Git submodules:
-
-| Dependency | Revision used by this repository | Purpose |
-| --- | --- | --- |
-| [Raspberry Pi Pico SDK](https://github.com/raspberrypi/pico-sdk) | `1.5.1` / `6a7db34ff63345a7badec79ebea3aaef1712f374` | RP2040 runtime and build system |
-| [jfedor2/tinyusb](https://github.com/jfedor2/tinyusb) | `8ef98ab274065e29ba138cc6f2efa0dc68028db3` | USB device and host stack |
-| [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB) | `d00a10a8c425d0d40f81b87169102944b01f3bb3` | Downstream USB host on GPIO0/GPIO1 |
-
-The validated local toolchain was Arm GNU Toolchain `13.2.Rel1`. The project
-requires CMake 3.13 or newer, Python 3, and a host C++ compiler. Dependency
-licenses and notices remain in their respective submodule directories.
-
-## Run the host tests
-
-The host tests do not require a connected wheel or Pico. On Windows, use a
-Developer PowerShell with MSVC and Ninja:
-
-```sh
-cmake -S tests -B build-host-tests -G Ninja
-cmake --build build-host-tests --parallel
-ctest --test-dir build-host-tests --output-on-failure
-```
-
-The suite covers normal and inverted load-cell calibration, invalid and stale
-reports, disconnect recovery, native G27 axes and buttons, gears and neutral,
-packed G29 offsets, the PlayStation-button chord, force-feedback ordering and
-overflow, force-profile transforms and selection, G27 status patterns, failed
-sends, native-mode re-enumeration, and fair authentication arbitration.
+For source builds, pinned dependencies, toolchain details, and host tests, see
+the [developer build guide](docs/building.md).
