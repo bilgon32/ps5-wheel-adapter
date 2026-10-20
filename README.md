@@ -101,11 +101,28 @@ hub.
 
 ![Adapter connection diagram](diagram.png)
 
+## Download the firmware
+
+Download the ready-to-flash [adapter.uf2 from firmware-v2026.10.20](https://github.com/bilgon32/ps5-wheel-adapter/releases/download/firmware-v2026.10.20/adapter.uf2)
+for the Raspberry Pi Pico (RP2040). This release includes the native G27,
+external-brake, force-feedback profile, and status LED features described here.
+See the [release notes](https://github.com/bilgon32/ps5-wheel-adapter/releases/tag/firmware-v2026.10.20)
+for build details and the `SHA256SUMS` checksum file, or check
+[Releases](https://github.com/bilgon32/ps5-wheel-adapter/releases) for newer builds.
+
+The release was built from commit `8bcd1d3` with the pinned dependencies. All six
+host tests passed and the RP2040 UF2 structure was validated; this release build
+has not been tested on physical hardware.
+
+To install, hold **BOOTSEL** while connecting the Pico to your computer, then
+copy the downloaded `adapter.uf2` to the **RPI-RP2** drive. Continue with
+[Flash and connect the adapter](#flash-and-connect-the-adapter) below.
+
 ## Build the firmware
 
 The root-level `adapter.uf2` is the original upstream binary. It does not include
-the native G27 or external-brake changes. Build this fork and use
-`build/adapter.uf2` to get all features described here.
+the native G27 or external-brake changes. Use the release download above, or
+build this fork and use `build/adapter.uf2` to get all features described here.
 
 Clone the fork and initialize its pinned dependencies:
 
@@ -161,7 +178,8 @@ The resulting firmware is `build/adapter.uf2`.
 2. Hold its **BOOTSEL** button while connecting its built-in USB port to your
    computer.
 3. Open the `RPI-RP2` drive that appears.
-4. Copy `build/adapter.uf2` to that drive. The Pico automatically reboots.
+4. Copy the downloaded `adapter.uf2` (or `build/adapter.uf2` if you built it
+   yourself) to that drive. The Pico automatically reboots.
 5. Disconnect the Pico from the computer.
 6. Connect the wheel and authentication controller to the downstream USB hub.
    Connect the Arduino Micro too if using the external brake.
